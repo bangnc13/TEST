@@ -65,14 +65,9 @@ def get_segment_length_from_dc(df_dc, node_a, node_b):
     clean_a = clean_node_name(node_a)
     clean_b = clean_node_name(node_b)
     
-    # Tìm cột chứa tên điểm và cột độ dài
-    cols = [str(c).upper() for c in df_dc.columns]
-    
-    # Giả định tìm các dòng chứa thông tin 2 điểm
     for idx, row in df_dc.iterrows():
         row_str = " ".join([str(v) for v in row.values if pd.notna(v)])
         if clean_a in row_str and clean_b in row_str:
-            # Tìm số liệu độ dài (thường là số float/int nằm trong các cột)
             for val in row.values:
                 if isinstance(val, (int, float)) and 10 < val < 50000:
                     return float(val)
@@ -84,7 +79,6 @@ def get_segment_length_from_dc(df_dc, node_a, node_b):
 def get_route_between_two_points(p1_coord, p2_coord, gdf_lines):
     """
     Tìm đường uốn lượn chính xác từ P1 -> P2.
-    Thử nghiệm theo thứ tự:
     1. Tìm trong các đoạn LineString GeoJSON gần nhất
     2. Nếu GeoJSON bị đứt quãng -> Gọi OSRM Map Matching bám đường thực tế
     """
@@ -114,11 +108,10 @@ def get_route_between_two_points(p1_coord, p2_coord, gdf_lines):
                 if not sub_l.is_empty and sub_l.length > 0:
                     best_subline = sub_l
 
-    # Nếu khoảng cách tìm thấy trong GeoJSON rất gần (< 100m)
-    if min_dist < 0.001 và best_subline:
+    # Sửa lỗi: dùng 'and' thay vì 'và'
+    if min_dist < 0.001 and best_subline:
         coords = [(lat, lon) for lon, lat in best_subline.coords]
-        # Kiểm tra chiều
-        d_start = (coords[0][0]-lat1)**2 + (coords[0][1]-lon1)**2
+        d_start = (coords[0][0]-lat1)**2 + (coords[0][0]-lon1)**2
         d_end = (coords[-1][0]-lat1)**2 + (coords[-1][1]-lon1)**2
         if d_end < d_start:
             coords = coords[::-1]
@@ -204,7 +197,6 @@ def find_point_along_path(coords, target_dist):
     accumulated = 0.0
     path_measured = [coords[0]]
     
-    # Tính tổng chiều dài thực địa của đường cong
     total_len = 0.0
     for i in range(len(coords) - 1):
         p1 = coords[i]
@@ -281,13 +273,10 @@ else:
             if len(valid_nodes) < 2:
                 st.error("Không đủ tọa độ tập điểm để vẽ tuyến!")
             else:
-                # DÙNG THUẬT TOÁN NỐI ĐƯỜNG UỐN LƯỢN THỰC TẾ
                 full_curved_coords = build_full_curved_path(valid_nodes, coord_dict, gdf_lines)
 
-                # Kiểm tra chiều dài trong Sheet DC
                 dc_length = get_segment_length_from_dc(df_dc, td_do, td_huong)
 
-                # Tính vị trí điểm đo
                 path_meas, path_rem, target_coord, total_len = find_point_along_path(full_curved_coords, khoang_cach_input)
                 
                 info_msg = f"📌 Tổng chiều dài tuyến cáp mô phỏng thực tế: **{total_len:.1f} m** | Khoảng cách đo: **{khoang_cach_input:.1f} m**"
