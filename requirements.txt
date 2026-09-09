@@ -5,5 +5,4 @@ pyproj
 folium
 openpyxl
 shapely
-fiona
 streamlit-folium
