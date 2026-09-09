@@ -6,3 +6,4 @@ folium
 openpyxl
 shapely
 streamlit-folium
+networkx
