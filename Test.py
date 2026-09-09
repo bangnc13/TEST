@@ -5,16 +5,18 @@ import folium
 from streamlit_folium import folium_static
 from pyproj import Geod
 from shapely.geometry import Point, LineString, MultiLineString
+from shapely.ops import nearest_points, snap, split, substring
+import networkx as nx
 import re
 import os
 
-st.set_page_config(layout="wide", page_title="Hệ thống Quản lý & Định vị Tuyến Cáp")
+st.set_page_config(layout="wide", page_title="Hệ thống Định vị & Quản lý Tuyến Cáp")
 
-# Khởi tạo Geod WGS84
+# Trắc địa WGS84
 geod = Geod(ellps="WGS84")
 
 # ==========================================
-# 1. HÀM CHUẨN HÓA TÊN TẬP ĐIỂM
+# 1. CHUẨN HÓA TÊN TẬP ĐIỂM
 # ==========================================
 def clean_node_name(raw_name):
     if not raw_name or pd.isna(raw_name):
@@ -26,7 +28,7 @@ def clean_node_name(raw_name):
     return cleaned
 
 # ==========================================
-# 2. HÀM NẠP & TÁCH DỮ LIỆU GEOJSON
+# 2. NẠP DỮ LIỆU & TÁCH GEOMETRY
 # ==========================================
 @st.cache_data
 def load_data(geojson_path, excel_path):
@@ -36,7 +38,7 @@ def load_data(geojson_path, excel_path):
     try:
         gdf_all = gpd.read_file(geojson_path)
         
-        # Tách riêng Point (Tập điểm) và LineString (Tuyến cáp thực tế)
+        # Tách Point và LineString
         gdf_points = gdf_all[gdf_all.geometry.type == 'Point'].copy()
         gdf_lines = gdf_all[gdf_all.geometry.type.isin(['LineString', 'MultiLineString'])].copy()
 
@@ -53,7 +55,7 @@ def load_data(geojson_path, excel_path):
         return None, None, None, None, f"Lỗi đọc file: {e}"
 
 # ==========================================
-# 3. BÓC TÁCH TUYẾN CHUỖI UPLINK
+# 3. BÓC TÁCH CHUỖI UPLINK
 # ==========================================
 def extract_route_from_uplink(df_uplink, start_node, end_node):
     s_clean = clean_node_name(start_node)
@@ -95,66 +97,84 @@ def extract_route_from_uplink(df_uplink, start_node, end_node):
     return None, f"Không tìm thấy dòng Uplink chứa cả 2 tập điểm {start_node} và {end_node}!"
 
 # ==========================================
-# 4. TRẮC ĐỊA & LẤY TỌA ĐỘ UỐN LƯỢN CHI TIẾT
+# 4. THUẬT TOÁN TÌM ĐƯỜNG UỐN LƯỢN TRONG CÁC LINESTRING
 # ==========================================
-def get_detailed_segment_coords(p1_coord, p2_coord, gdf_lines):
+def find_detailed_line_between_points(p1_coord, p2_coord, gdf_lines):
     """
-    Tìm đường LineString thực tế trong GeoJSON nối giữa 2 điểm p1 và p2.
-    Nếu tìm thấy LineString uốn lượn, trả về danh sách toàn bộ tọa độ uốn lượn.
-    Nếu không tìm thấy, trả về đoạn thẳng [p1, p2].
+    p1_coord, p2_coord: (lat, lon)
+    Tìm LineString trong GeoJSON đi qua hoặc nối 2 điểm này.
     """
-    p1_pt = Point(p1_coord[1], p1_coord[0]) # lon, lat
-    p2_pt = Point(p2_coord[1], p2_coord[0])
-    
-    # Tìm đường LineString tiếp xúc gần nhất với p1 và p2
-    best_line = None
-    min_dist_sum = float('inf')
+    pt1 = Point(p1_coord[1], p1_coord[0]) # lon, lat
+    pt2 = Point(p2_coord[1], p2_coord[0])
+
+    best_coords = None
+    min_score = float('inf')
 
     for _, row in gdf_lines.iterrows():
         geom = row.geometry
-        if geom.type == 'MultiLineString':
-            lines = list(geom.geoms)
-        else:
-            lines = [geom]
+        if geom.is_empty:
+            continue
+
+        lines = list(geom.geoms) if geom.type == 'MultiLineString' else [geom]
 
         for line in lines:
-            d1 = line.distance(p1_pt)
-            d2 = line.distance(p2_pt)
-            # Ngưỡng chấp nhận kết nối (khoảng 50m trong độ)
-            if d1 < 0.0005 and d2 < 0.0005:
-                dist_sum = d1 + d2
-                if dist_sum < min_dist_sum:
-                    min_dist_sum = dist_sum
-                    best_line = line
+            d1 = line.distance(pt1)
+            d2 = line.distance(pt2)
 
-    if best_line is not None:
-        coords = [(lat, lon) for lon, lat in best_line.coords]
-        # Kiểm tra chiều đường cáp (từ p1 -> p2 hay ngược lại)
-        d_start_p1 = (coords[0][0]-p1_coord[0])**2 + (coords[0][1]-p1_coord[1])**2
-        d_end_p1 = (coords[-1][0]-p1_coord[0])**2 + (coords[-1][1]-p1_coord[1])**2
-        
-        if d_end_p1 < d_start_p1:
-            coords = coords[::-1]
-        return coords
+            # Đánh giá độ gần của LineString với cả 2 điểm
+            score = d1 + d2
+            if score < min_score:
+                min_score = score
+                
+                # Chiếu 2 điểm lên LineString để lấy đúng đoạn giữa 2 điểm
+                proj1 = line.project(pt1)
+                proj2 = line.project(pt2)
+
+                start_pr, end_pr = min(proj1, proj2), max(proj1, proj2)
+                
+                # Trích xuất đoạn cáp uốn lượn thực sự giữa 2 điểm
+                sub_l = substring(line, start_pr, end_pr)
+                
+                if not sub_l.is_empty:
+                    if sub_l.type == 'LineString':
+                        coords = [(lat, lon) for lon, lat in sub_l.coords]
+                    else:
+                        coords = []
+                        for g in sub_l.geoms:
+                            coords.extend([(lat, lon) for lon, lat in g.coords])
+                    
+                    if len(coords) >= 2:
+                        # Kiểm tra hướng đi p1 -> p2
+                        d_start = (coords[0][0]-p1_coord[0])**2 + (coords[0][1]-p1_coord[1])**2
+                        d_end = (coords[-1][0]-p1_coord[0])**2 + (coords[-1][1]-p1_coord[1])**2
+                        if d_end < d_start:
+                            coords = coords[::-1]
+                        best_coords = coords
+
+    # Nếu khoảng cách đến LineString nhỏ hơn ngưỡng cho phép (khoảng 150m)
+    if min_score < 0.0015 and best_coords:
+        return best_coords
     else:
+        # Dự phòng nếu không có LineString tương ứng
         return [p1_coord, p2_coord]
 
-def build_full_detailed_route(route_coords, gdf_lines):
-    full_coords = []
+def build_complete_detailed_path(route_coords, gdf_lines):
+    full_path = []
     for i in range(len(route_coords) - 1):
         p1 = route_coords[i]
         p2 = route_coords[i+1]
-        seg_coords = get_detailed_segment_coords(p1, p2, gdf_lines)
         
-        if not full_coords:
-            full_coords.extend(seg_coords)
+        segment_path = find_detailed_line_between_points(p1, p2, gdf_lines)
+        
+        if not full_path:
+            full_path.extend(segment_path)
         else:
-            full_coords.extend(seg_coords[1:])
+            full_path.extend(segment_path[1:])
             
-    return full_coords
+    return full_path
 
 # ==========================================
-# 5. TÍNH VỊ TRÍ ĐIỂM ĐO TRÊN ĐƯỜNG UỐN LƯỢN
+# 5. TÍNH KHOẢNG CÁCH DỒN & ĐỊNH VỊ ĐIỂM ĐO
 # ==========================================
 def find_point_along_path(coords, target_dist):
     accumulated = 0.0
@@ -189,7 +209,7 @@ def find_point_along_path(coords, target_dist):
     return coords, [coords[-1]], target_coord, total_len
 
 # ==========================================
-# 6. GIAO DIỆN STREAMLIT CHÍNH
+# 6. GIAO DIỆN CHÍNH STREAMLIT
 # ==========================================
 st.title("📍 Hệ thống Quản lý & Định vị Vị trí Sự cố Cáp")
 
@@ -241,17 +261,17 @@ else:
                     valid_nodes.append(node)
 
             if len(route_coords) < 2:
-                st.error("Không đủ tọa độ để tạo tuyến cáp!")
+                st.error("Không đủ tọa độ tập điểm để vẽ tuyến!")
             else:
-                # XÂY DỰNG TUYẾN CÁP UỐN LƯỢN CHI TIẾT TỪ GEOJSON
-                detailed_coords = build_full_detailed_route(route_coords, gdf_lines)
+                # XÂY DỰNG TUYẾN CÁP UỐN LƯỢN CHI TIẾT
+                detailed_coords = build_complete_detailed_path(route_coords, gdf_lines)
 
-                # Tính vị trí chính xác điểm đo trên đường uốn lượn
+                # Tính vị trí chính xác điểm đo
                 path_meas, path_rem, target_coord, total_len = find_point_along_path(detailed_coords, khoang_cach_input)
                 
                 st.success(f"📌 Tổng chiều dài cáp uốn lượn thực tế: **{total_len:.1f} m** | Khoảng cách đo: **{khoang_cach_input:.1f} m**")
 
-                # 1. Hiển thị các Tập điểm
+                # 1. Vẽ các Tập điểm trên tuyến
                 for node in valid_nodes:
                     pos = coord_dict[node]
                     icon_color = "green" if node == clean_node_name(td_do) else ("red" if node == clean_node_name(td_huong) else "blue")
@@ -268,7 +288,7 @@ else:
                         )
                     ).add_to(m)
 
-                # 2. Vẽ ĐOẠN CÁP ĐÃ ĐO (Đỏ uốn lượn theo đường cáp thực tế)
+                # 2. Vẽ ĐOẠN CÁP ĐÃ ĐO (Đỏ uốn lượn thực tế)
                 folium.PolyLine(
                     path_meas, color="#FF0000", weight=5, opacity=0.9, tooltip=f"Đoạn cáp đã đo ({khoang_cach_input}m)"
                 ).add_to(m)
@@ -279,7 +299,7 @@ else:
                         path_rem, color="#00FFFF", weight=4, opacity=0.8, dash_array='6, 8', tooltip="Đoạn cáp còn lại"
                     ).add_to(m)
 
-                # 4. ĐÁNH DẤU CHÍNH XÁC VỊ TRÍ ĐO
+                # 4. VỊ TRÍ ĐIỂM ĐO / ĐIỂM SỰ CỐ
                 folium.Marker(
                     target_coord,
                     popup=f"Vị trí đo: {khoang_cach_input}m",
