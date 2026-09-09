@@ -4,7 +4,6 @@ import pandas as pd
 import folium
 from folium import plugins
 from streamlit_folium import folium_static
-from pyproj import Geod
 import networkx as nx
 import re
 import os
@@ -19,10 +18,10 @@ def clean_node_name(raw_name):
     Chuyển tên như 'TQGP001.0075/HO/16' hoặc 'TQGP001.0316/CO/6' 
     thành tên chuẩn gốc 'TQGP001.0075/HO' để khớp với GeoJSON
     """
-    if not isinstance(raw_name, str):
+    if not raw_name or pd.isna(raw_name):
         return ""
     
-    name = raw_name.strip()
+    name = str(raw_name).strip()
     # Loại bỏ phần /16, /6, /4... ở cuối tên nếu có
     cleaned = re.sub(r'/(CO|HO|MO|CAP|P|D)/\d+$', r'/\1', name, flags=re.IGNORECASE)
     if cleaned == name:
@@ -65,41 +64,37 @@ def build_network_graph(gdf_points, df_uplink, df_dc):
     
     # 1. Thêm tất cả điểm từ GeoJSON vào Đồ thị
     for _, row in gdf_points.iterrows():
-        node_id = str(row[name_col]).strip()
+        node_id = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
         if node_id:
             G.add_node(node_id, pos=(row.geometry.y, row.geometry.x))
 
     # 2. Bóc tách chuỗi Uplink (dạng A=>B=>C)
-    # Tìm cột chứa thông số Uplink
     uplink_col = None
     for col in df_uplink.columns:
         if 'UPLINK' in str(col).upper() or 'THÔNG SỐ' in str(col).upper():
             uplink_col = col
             break
     if uplink_col is None and len(df_uplink.columns) >= 2:
-        uplink_col = df_uplink.columns[1] # Mặc định lấy cột B như trong hình
+        uplink_col = df_uplink.columns[1]
 
     if uplink_col:
         for _, row in df_uplink.iterrows():
-            route_str = str(row[uplink_col])
+            route_str = str(row[uplink_col]) if pd.notna(row[uplink_col]) else ""
             if '=>' in route_str:
-                # Tách chuỗi theo dấu =>
                 raw_nodes = route_str.split('=>')
-                # Làm sạch tên từng điểm
-                clean_nodes = [clean_node_name(n) for n in raw_nodes if 'Trung Gian' not in n]
-                clean_nodes = [n for n in clean_nodes if n] # Bỏ chuỗi rỗng
+                clean_nodes = [clean_node_name(n) for n in raw_nodes if 'Trung Gian' not in str(n)]
+                clean_nodes = [n for n in clean_nodes if n]
                 
-                # Tạo các cạnh liên kết giữa các điểm kế tiếp
                 for i in range(len(clean_nodes) - 1):
                     u, v = clean_nodes[i], clean_nodes[i+1]
                     if u != v:
                         G.add_edge(u, v)
 
-    # 3. Cập nhật chiều dài cáp từ sheet DC (nếu có)
+    # 3. Cập nhật chiều dài cáp từ sheet DC
     if not df_dc.empty and len(df_dc.columns) >= 3:
         for _, row in df_dc.iterrows():
-            u = clean_node_name(str(row.iloc[0]))
-            v = clean_node_name(str(row.iloc[1]))
+            u = clean_node_name(row.iloc[0])
+            v = clean_node_name(row.iloc[1])
             try:
                 length = float(row.iloc[2])
                 if G.has_edge(u, v):
@@ -115,7 +110,6 @@ def build_network_graph(gdf_points, df_uplink, df_dc):
 # 4. TÌM ĐƯỜNG VÀ BÓC TÁCH TỌA ĐỘ
 # ==========================================
 def find_path_and_coords(graph, start_node, end_node):
-    # Chuẩn hóa tên đầu vào
     s_clean = clean_node_name(start_node)
     e_clean = clean_node_name(end_node)
     
@@ -125,7 +119,6 @@ def find_path_and_coords(graph, start_node, end_node):
         return None, None, f"Không tìm thấy điểm định hướng: {end_node} trong GeoJSON!"
 
     try:
-        # Tìm đường đi ngắn nhất qua liên kết Uplink
         path = nx.shortest_path(graph, source=s_clean, target=e_clean)
         
         path_coords = []
@@ -162,7 +155,10 @@ if err:
     st.error(err)
 else:
     name_col_json = 'name' if 'name' in gdf_pts.columns else gdf_pts.columns[0]
-    list_points = sorted(gdf_pts[name_col_json].astype(str).unique().tolist())
+    
+    # SỬA LỖI: Lọc bỏ giá trị rỗng/Null và chuyển về kiểu chuỗi trước khi sắp xếp
+    raw_points = gdf_pts[name_col_json].dropna().astype(str).tolist()
+    list_points = sorted(list(set([p.strip() for p in raw_points if p.strip()])))
 
     # Sidebar
     st.sidebar.header("Thông tin đo đạc")
@@ -182,13 +178,14 @@ else:
     # Hiển thị tất cả tập điểm
     marker_cluster = plugins.MarkerCluster().add_to(m)
     for _, row in gdf_pts.iterrows():
-        name = str(row[name_col_json])
-        coord = (row.geometry.y, row.geometry.x)
-        folium.CircleMarker(
-            location=coord, radius=4, color="yellow", fill=True, fill_color="yellow", fill_opacity=0.9, tooltip=name
-        ).add_to(marker_cluster)
+        if pd.notna(row[name_col_json]):
+            name = str(row[name_col_json]).strip()
+            coord = (row.geometry.y, row.geometry.x)
+            folium.CircleMarker(
+                location=coord, radius=4, color="yellow", fill=True, fill_color="yellow", fill_opacity=0.9, tooltip=name
+            ).add_to(marker_cluster)
 
-    # Xử lý tính toán
+    # Xử lý tính toán khi bấm nút
     if btn_calc and td_do and td_huong:
         graph = build_network_graph(gdf_pts, df_uplink, df_dc)
         path_coords, path_segments, path_err = find_path_and_coords(graph, td_do, td_huong)
@@ -198,7 +195,7 @@ else:
         else:
             st.success(f"📌 Đã bóc tách thành công tuyến liên kết Uplink từ **{td_do}** đến **{td_huong}**")
             
-            # 1. Vẽ đường Uplink liên kết (Xanh lam đậm)
+            # 1. Vẽ đường Uplink liên kết (Xanh lơ)
             if path_coords:
                 folium.PolyLine(path_coords, color="#00FFFF", weight=5, opacity=0.9, tooltip="Đường Uplink kết nối").add_to(m)
 
