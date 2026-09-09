@@ -9,19 +9,18 @@ from shapely.ops import substring
 import re
 import os
 
-st.set_page_config(layout="wide", page_title="Hệ thống Quản lý & Mô phỏng Tuyến Cáp")
+st.set_page_config(layout="wide", page_title="Hệ thống Quản lý & Mô phỏng Tuyến Cáp Thực Tế")
 
-# Trắc địa WGS84
 geod = Geod(ellps="WGS84")
 
 # ==========================================
-# 1. HÀM CHUẨN HÓA MÃ TẬP ĐIỂM (CORE CODE)
+# 1. HÀM CHUẨN HÓA MÃ TẬP ĐIỂM THÔNG MINH
 # ==========================================
 def extract_core_code(raw_name):
     """
-    Rút gọn tên tập điểm về mã cốt lõi:
+    Chuẩn hóa mã về dạng gốc:
     'TQGP001.0198/HO' -> 'TQGP001.198'
-    'TQGP001.0200/CO/2' -> 'TQGP001.200'
+    'TQGP001.0200/CO' -> 'TQGP001.200'
     """
     if not raw_name or pd.isna(raw_name):
         return ""
@@ -57,20 +56,58 @@ def load_data(geojson_path, excel_path):
         
         uplink_sheet = sheet_map.get('UPLINK', sheet_names[0])
         df_uplink = pd.read_excel(excel_path, sheet_name=uplink_sheet)
-        df_dc = pd.read_excel(excel_path, sheet_name=sheet_map['DC']) if 'DC' in sheet_map else pd.DataFrame()
+        
+        dc_sheet = sheet_map.get('DC', None)
+        df_dc = pd.read_excel(excel_path, sheet_name=dc_sheet) if dc_sheet else pd.DataFrame()
 
         return gdf_points, gdf_lines, df_uplink, df_dc, None
     except Exception as e:
         return None, None, None, None, f"Lỗi đọc file: {e}"
 
 # ==========================================
-# 3. TRÍCH XUẤT ĐOẠN CÁP UỐN LƯỢN CHỈ TỪ GEOJSON
+# 3. TÍNH CHIỀU DÀI CHUẨN TỪ SHEET DC (EXCEL)
+# ==========================================
+def get_segment_length_from_dc(df_dc, node_a, node_b):
+    """
+    Tra cứu chiều dài đoạn cáp giữa 2 tập điểm trong Sheet DC.
+    Ưu tiên cột 'Chiều dài thực (m)', sau đó mới đến 'Chiều dài GPS'.
+    """
+    if df_dc is None or df_dc.empty:
+        return None
+    
+    core_a = extract_core_code(node_a)
+    core_b = extract_core_code(node_b)
+    
+    # Tìm các cột
+    col_kn1 = next((c for c in df_dc.columns if 'KN1' in str(c).upper() or 'ĐIỂM 1' in str(c).upper()), None)
+    col_kn2 = next((c for c in df_dc.columns if 'KN2' in str(c).upper() or 'ĐIỂM 2' in str(c).upper()), None)
+    col_real = next((c for c in df_dc.columns if 'THỰC' in str(c).upper()), None)
+    col_gps = next((c for c in df_dc.columns if 'GPS' in str(c).upper()), None)
+
+    for idx, row in df_dc.iterrows():
+        if col_kn1 and col_kn2:
+            val1 = extract_core_code(row[col_kn1])
+            val2 = extract_core_code(row[col_kn2])
+            if (val1 == core_a and val2 == core_b) or (val1 == core_b and val2 == core_a):
+                if col_real and pd.notna(row[col_real]):
+                    try: return float(row[col_real])
+                    except: pass
+                if col_gps and pd.notna(row[col_gps]):
+                    try: return float(row[col_gps])
+                    except: pass
+        else:
+            # So sánh tự do nếu tên cột khác
+            row_str = " ".join([str(v) for v in row.values if pd.notna(v)])
+            if core_a in row_str and core_b in row_str:
+                for val in row.values:
+                    if isinstance(val, (int, float)) and 10 < val < 50000:
+                        return float(val)
+    return None
+
+# ==========================================
+# 4. LẤY TỎA ĐỘ ĐƯỜNG CÁP CHỈ TỪ GEOJSON
 # ==========================================
 def get_geojson_cable_segment(p1_coord, p2_coord, gdf_lines):
-    """
-    Chỉ tìm và cắt duy nhất đoạn LineString thuộc GeoJSON bao phủ giữa 2 điểm P1 và P2.
-    Không dùng OSRM hay đường giao thông công cộng.
-    """
     lat1, lon1 = p1_coord
     lat2, lon2 = p2_coord
     
@@ -87,7 +124,6 @@ def get_geojson_cable_segment(p1_coord, p2_coord, gdf_lines):
             
         lines = list(geom.geoms) if geom.type == 'MultiLineString' else [geom]
         for line in lines:
-            # Tính tổng khoảng cách từ 2 điểm tới đường cáp này
             d1 = line.distance(pt1)
             d2 = line.distance(pt2)
             d_total = d1 + d2
@@ -95,7 +131,6 @@ def get_geojson_cable_segment(p1_coord, p2_coord, gdf_lines):
             if d_total < min_dist_sum:
                 min_dist_sum = d_total
                 
-                # Chiếu 2 điểm lên đường cáp LineString
                 proj1 = line.project(pt1)
                 proj2 = line.project(pt2)
                 
@@ -113,16 +148,13 @@ def get_geojson_cable_segment(p1_coord, p2_coord, gdf_lines):
                     if len(coords) >= 2:
                         best_subline_coords = coords
 
-    # Nếu tìm thấy đường cáp trong GeoJSON đủ gần
-    if best_subline_coords:
-        # Kiếm tra hướng đi từ P1 -> P2
+    if best_subline_coords and min_dist_sum < 0.05:
         d_start = (best_subline_coords[0][0]-lat1)**2 + (best_subline_coords[0][1]-lon1)**2
         d_end = (best_subline_coords[-1][0]-lat1)**2 + (best_subline_coords[-1][1]-lon1)**2
         if d_end < d_start:
             best_subline_coords = best_subline_coords[::-1]
         return best_subline_coords
 
-    # Nếu không tìm thấy LineString phù hợp, nối trực tiếp 2 điểm
     return [p1_coord, p2_coord]
 
 def build_pure_geojson_path(route_nodes, valid_coords, gdf_lines):
@@ -141,7 +173,7 @@ def build_pure_geojson_path(route_nodes, valid_coords, gdf_lines):
     return full_path
 
 # ==========================================
-# 4. BÓC TÁCH CHUỖI UPLINK
+# 5. BÓC TÁCH CHUỖI UPLINK
 # ==========================================
 def extract_route_from_uplink(df_uplink, start_node, end_node):
     core_s = extract_core_code(start_node)
@@ -179,41 +211,43 @@ def extract_route_from_uplink(df_uplink, start_node, end_node):
     return None, f"Không tìm thấy dòng Uplink chứa cả 2 tập điểm {start_node} và {end_node}!"
 
 # ==========================================
-# 5. TÍNH KHOẢNG CÁCH DỒN & ĐỊNH VỊ ĐIỂM SỰ CỐ
+# 6. TÍNH ĐIỂM SỰ CỐ TỶ LỆ THEO CHIỀU DÀI EXCEL
 # ==========================================
-def find_point_along_path(coords, target_dist):
+def find_point_along_path_scaled(coords, target_dist, total_excel_len):
+    # Tính chiều dài hình học trên bản đồ GeoJSON
+    map_total_len = 0.0
+    for i in range(len(coords) - 1):
+        p1, p2 = coords[i], coords[i+1]
+        _, _, seg_dist = geod.inv(p1[1], p1[0], p2[1], p2[0])
+        map_total_len += seg_dist
+
+    # Tỷ lệ giữa thực tế Excel và đồ họa GeoJSON
+    scale = map_total_len / total_excel_len if total_excel_len > 0 else 1.0
+    effective_target_dist = target_dist * scale
+
     accumulated = 0.0
     path_measured = [coords[0]]
-    
-    total_len = 0.0
-    for i in range(len(coords) - 1):
-        p1 = coords[i]
-        p2 = coords[i+1]
-        _, _, seg_dist = geod.inv(p1[1], p1[0], p2[1], p2[0])
-        total_len += seg_dist
 
     for i in range(len(coords) - 1):
-        p1 = coords[i]
-        p2 = coords[i+1]
+        p1, p2 = coords[i], coords[i+1]
         az12, az21, seg_dist = geod.inv(p1[1], p1[0], p2[1], p2[0])
         
-        if accumulated + seg_dist >= target_dist:
-            remain = target_dist - accumulated
+        if accumulated + seg_dist >= effective_target_dist:
+            remain = effective_target_dist - accumulated
             target_lon, target_lat, _ = geod.fwd(p1[1], p1[0], az12, remain)
             target_coord = (target_lat, target_lon)
             path_measured.append(target_coord)
             
             path_remaining = [target_coord] + coords[i+1:]
-            return path_measured, path_remaining, target_coord, total_len
+            return path_measured, path_remaining, target_coord, map_total_len
         else:
             accumulated += seg_dist
             path_measured.append(p2)
             
-    target_coord = coords[-1]
-    return coords, [coords[-1]], target_coord, total_len
+    return coords, [coords[-1]], coords[-1], map_total_len
 
 # ==========================================
-# 6. GIAO DIỆN CHÍNH STREAMLIT
+# 7. GIAO DIỆN CHÍNH STREAMLIT
 # ==========================================
 st.title("📍 Hệ thống Quản lý & Mô phỏng Tuyến Cáp Thực Tế")
 
@@ -278,14 +312,38 @@ else:
             if len(valid_nodes) < 2:
                 st.error("Không đủ tọa độ tập điểm để vẽ tuyến!")
             else:
-                # CHỈ LẤY ĐƯỜNG CÁP CHÍNH XÁC TỪ GEOJSON (KHÔNG DÙNG OSRM)
+                # 1. TÍNH TỔNG CHIỀU DÀI THỰC TẾ TỪ SHEET DC (EXCEL)
+                total_excel_len = 0.0
+                seg_details = []
+                for i in range(len(valid_nodes) - 1):
+                    n1, n2 = valid_nodes[i], valid_nodes[i+1]
+                    seg_len = get_segment_length_from_dc(df_dc, n1, n2)
+                    if seg_len:
+                        total_excel_len += seg_len
+                        seg_details.append(f"{extract_core_code(n1)}➔{extract_core_code(n2)}: {seg_len}m")
+
+                # 2. LẤY TỎA ĐỘ BÁM ĐƯỜNG GEOJSON THỰC TẾ
                 full_curved_coords = build_pure_geojson_path(valid_nodes, valid_coords, gdf_lines)
 
-                path_meas, path_rem, target_coord, total_len = find_point_along_path(full_curved_coords, khoang_cach_input)
-                
-                st.success(f"📌 Tổng chiều dài tuyến cáp GeoJSON thực tế: **{total_len:.1f} m** | Khoảng cách đo: **{khoang_cach_input:.1f} m**")
+                # Nếu không tìm thấy trong DC, dùng khoảng cách GeoJSON
+                if total_excel_len == 0.0:
+                    map_len = 0.0
+                    for i in range(len(full_curved_coords) - 1):
+                        p1, p2 = full_curved_coords[i], full_curved_coords[i+1]
+                        _, _, d = geod.inv(p1[1], p1[0], p2[1], p2[0])
+                        map_len += d
+                    total_excel_len = map_len
 
-                # 1. Vẽ các Tập điểm
+                # 3. ĐỊNH VỊ ĐIỂM SỰ CỐ THEO TỶ LỆ
+                path_meas, path_rem, target_coord, map_total_len = find_point_along_path_scaled(
+                    full_curved_coords, khoang_cach_input, total_excel_len
+                )
+
+                # Hiển thị kết quả
+                detail_str = f" ({' + '.join(seg_details)})" if seg_details else ""
+                st.success(f"📌 Tổng chiều dài tuyến cáp trong Excel: **{total_excel_len:.1f} m**{detail_str} | Khoảng cách đo OTDR: **{khoang_cach_input:.1f} m**")
+
+                # 4. VẼ BẢN ĐỒ
                 for node in valid_nodes:
                     pos = valid_coords[node]
                     icon_color = "green" if extract_core_code(node) == extract_core_code(td_do) else ("red" if extract_core_code(node) == extract_core_code(td_huong) else "blue")
@@ -302,18 +360,18 @@ else:
                         )
                     ).add_to(m)
 
-                # 2. Vẽ ĐOẠN CÁP ĐÃ ĐO (Màu đỏ)
+                # Đoạn đã đo (Đỏ)
                 folium.PolyLine(
                     path_meas, color="#FF0000", weight=5, opacity=0.9, tooltip=f"Đoạn cáp đã đo ({khoang_cach_input}m)"
                 ).add_to(m)
 
-                # 3. Vẽ ĐOẠN CÁP CÒN LẠI (Màu xanh nét đứt)
+                # Đoạn còn lại (Xanh lơ nét đứt)
                 if len(path_rem) >= 2:
                     folium.PolyLine(
                         path_rem, color="#00FFFF", weight=4, opacity=0.8, dash_array='6, 8', tooltip="Đoạn cáp còn lại"
                     ).add_to(m)
 
-                # 4. VỊ TRÍ ĐIỂM SỰ CỐ / ĐIỂM ĐO
+                # Vị trí đo
                 folium.Marker(
                     target_coord,
                     popup=f"Vị trí đo: {khoang_cach_input}m",
