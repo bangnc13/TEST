@@ -2,7 +2,6 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import folium
-from folium import plugins
 from streamlit_folium import folium_static
 import networkx as nx
 import re
@@ -22,10 +21,9 @@ def clean_node_name(raw_name):
         return ""
     
     name = str(raw_name).strip()
-    # Loại bỏ phần /16, /6, /4... ở cuối tên nếu có
+    # Cắt bỏ phần cổng phía sau (/16, /6, /4, /5...)
     cleaned = re.sub(r'/(CO|HO|MO|CAP|P|D)/\d+$', r'/\1', name, flags=re.IGNORECASE)
     if cleaned == name:
-        # Nếu chưa cắt được, thử cắt đuôi số sau dấu / cuối cùng
         cleaned = re.sub(r'/\d+$', '', name)
     return cleaned
 
@@ -43,11 +41,9 @@ def load_data(geojson_path, excel_path):
         sheet_names = excel_file.sheet_names
         sheet_map = {str(s).strip().upper(): s for s in sheet_names}
         
-        # Đọc sheet uplink
         uplink_sheet = sheet_map.get('UPLINK', sheet_names[0])
         df_uplink = pd.read_excel(excel_path, sheet_name=uplink_sheet)
         
-        # Đọc sheet DC nếu có
         df_dc = pd.read_excel(excel_path, sheet_name=sheet_map['DC']) if 'DC' in sheet_map else pd.DataFrame()
 
         return gdf_points, df_uplink, df_dc, None
@@ -55,20 +51,12 @@ def load_data(geojson_path, excel_path):
         return None, None, None, f"Lỗi đọc file: {e}"
 
 # ==========================================
-# 3. XÂY DỰNG ĐỒ THỊ TỪ CHUỖI UPLINK (=>)
+# 3. BÓC TÁCH TUYẾN CHUỖI UPLINK
 # ==========================================
-def build_network_graph(gdf_points, df_uplink, df_dc):
-    G = nx.Graph()
+def extract_route_from_uplink(df_uplink, start_node, end_node):
+    s_clean = clean_node_name(start_node)
+    e_clean = clean_node_name(end_node)
     
-    name_col = 'name' if 'name' in gdf_points.columns else gdf_points.columns[0]
-    
-    # 1. Thêm tất cả điểm từ GeoJSON vào Đồ thị
-    for _, row in gdf_points.iterrows():
-        node_id = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
-        if node_id:
-            G.add_node(node_id, pos=(row.geometry.y, row.geometry.x))
-
-    # 2. Bóc tách chuỗi Uplink (dạng A=>B=>C)
     uplink_col = None
     for col in df_uplink.columns:
         if 'UPLINK' in str(col).upper() or 'THÔNG SỐ' in str(col).upper():
@@ -77,72 +65,39 @@ def build_network_graph(gdf_points, df_uplink, df_dc):
     if uplink_col is None and len(df_uplink.columns) >= 2:
         uplink_col = df_uplink.columns[1]
 
-    if uplink_col:
-        for _, row in df_uplink.iterrows():
-            route_str = str(row[uplink_col]) if pd.notna(row[uplink_col]) else ""
-            if '=>' in route_str:
-                raw_nodes = route_str.split('=>')
-                clean_nodes = [clean_node_name(n) for n in raw_nodes if 'Trung Gian' not in str(n)]
-                clean_nodes = [n for n in clean_nodes if n]
-                
-                for i in range(len(clean_nodes) - 1):
-                    u, v = clean_nodes[i], clean_nodes[i+1]
-                    if u != v:
-                        G.add_edge(u, v)
+    if not uplink_col:
+        return None, "Không tìm thấy cột thông số Uplink trong file Excel!"
 
-    # 3. Cập nhật chiều dài cáp từ sheet DC
-    if not df_dc.empty and len(df_dc.columns) >= 3:
-        for _, row in df_dc.iterrows():
-            u = clean_node_name(row.iloc[0])
-            v = clean_node_name(row.iloc[1])
-            try:
-                length = float(row.iloc[2])
-                if G.has_edge(u, v):
-                    G[u][v]['length'] = length
-                elif G.has_node(u) and G.has_node(v):
-                    G.add_edge(u, v, length=length)
-            except:
-                pass
-
-    return G
-
-# ==========================================
-# 4. TÌM ĐƯỜNG VÀ BÓC TÁCH TỌA ĐỘ
-# ==========================================
-def find_path_and_coords(graph, start_node, end_node):
-    s_clean = clean_node_name(start_node)
-    e_clean = clean_node_name(end_node)
-    
-    if not graph.has_node(s_clean):
-        return None, None, f"Không tìm thấy điểm đo gốc: {start_node} trong GeoJSON!"
-    if not graph.has_node(e_clean):
-        return None, None, f"Không tìm thấy điểm định hướng: {end_node} trong GeoJSON!"
-
-    try:
-        path = nx.shortest_path(graph, source=s_clean, target=e_clean)
-        
-        path_coords = []
-        path_segments = []
-        
-        for i in range(len(path) - 1):
-            u, v = path[i], path[i+1]
-            pos_u = graph.nodes[u].get('pos')
-            pos_v = graph.nodes[v].get('pos')
+    # Duyệt qua các hàng trong Excel để tìm dòng Uplink chứa cả điểm Gốc và Định hướng
+    for _, row in df_uplink.iterrows():
+        route_str = str(row[uplink_col]) if pd.notna(row[uplink_col]) else ""
+        if '=>' in route_str:
+            raw_nodes = route_str.split('=>')
+            clean_nodes = [clean_node_name(n) for n in raw_nodes if 'Trung Gian' not in str(n)]
             
-            if pos_u and pos_v:
-                if i == 0:
-                    path_coords.append(pos_u)
-                path_coords.append(pos_v)
+            # Loại bỏ các phần tử rỗng và các phần tử trùng nhau liên tiếp
+            final_nodes = []
+            for n in clean_nodes:
+                if n and (not final_nodes or final_nodes[-1] != n):
+                    final_nodes.append(n)
+
+            # Kiểm tra xem dòng này có chứa cả 2 điểm cần tìm không
+            if s_clean in final_nodes and e_clean in final_nodes:
+                idx_s = final_nodes.index(s_clean)
+                idx_e = final_nodes.index(e_clean)
                 
-                length = graph[u][v].get('length', None)
-                path_segments.append({'coords': [pos_u, pos_v], 'length': length})
-                
-        return path_coords, path_segments, None
-    except nx.NetworkXNoPath:
-        return None, None, f"Không tìm thấy đường nối liên tục từ {start_node} đến {end_node} trong chuỗi Uplink!"
+                # Cắt lấy danh sách các điểm nằm giữa 2 điểm chọn
+                if idx_s <= idx_e:
+                    sub_route = final_nodes[idx_s : idx_e + 1]
+                else:
+                    sub_route = final_nodes[idx_e : idx_s + 1][::-1]
+                    
+                return sub_route, None
+
+    return None, f"Không tìm thấy dòng Uplink chứa cả 2 tập điểm {start_node} và {end_node}!"
 
 # ==========================================
-# 5. GIAO DIỆN STREAMLIT CHÍNH
+# 4. GIAO DIỆN STREAMLIT CHÍNH
 # ==========================================
 st.title("📍 Hệ thống Tính toán & Hiển thị Mạng lưới Tập điểm")
 
@@ -156,7 +111,13 @@ if err:
 else:
     name_col_json = 'name' if 'name' in gdf_pts.columns else gdf_pts.columns[0]
     
-    # SỬA LỖI: Lọc bỏ giá trị rỗng/Null và chuyển về kiểu chuỗi trước khi sắp xếp
+    # Tạo từ điển Tên Tập Điểm -> Tọa độ (y, x)
+    coord_dict = {}
+    for _, row in gdf_pts.iterrows():
+        if pd.notna(row[name_col_json]):
+            node_name = str(row[name_col_json]).strip()
+            coord_dict[node_name] = (row.geometry.y, row.geometry.x)
+
     raw_points = gdf_pts[name_col_json].dropna().astype(str).tolist()
     list_points = sorted(list(set([p.strip() for p in raw_points if p.strip()])))
 
@@ -167,64 +128,95 @@ else:
     khoang_cach_input = st.sidebar.number_input("Khoảng cách đo (m):", min_value=0.0, value=500.0, step=1.0)
     btn_calc = st.sidebar.button("Tính toán & Vẽ bản đồ")
 
-    # Bản đồ vệ tinh Google
+    # Bản đồ mặc định
     m = folium.Map(
         location=[gdf_pts.geometry.y.mean(), gdf_pts.geometry.x.mean()], 
-        zoom_start=16, 
+        zoom_start=15, 
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', 
         attr='Google Satellite'
     )
 
-    # Hiển thị tất cả tập điểm
-    marker_cluster = plugins.MarkerCluster().add_to(m)
-    for _, row in gdf_pts.iterrows():
-        if pd.notna(row[name_col_json]):
-            name = str(row[name_col_json]).strip()
-            coord = (row.geometry.y, row.geometry.x)
-            folium.CircleMarker(
-                location=coord, radius=4, color="yellow", fill=True, fill_color="yellow", fill_opacity=0.9, tooltip=name
-            ).add_to(marker_cluster)
-
-    # Xử lý tính toán khi bấm nút
+    # Nếu BẤM NÚT: Chỉ hiển thị các tập điểm thuộc tuyến được bóc tách
     if btn_calc and td_do and td_huong:
-        graph = build_network_graph(gdf_pts, df_uplink, df_dc)
-        path_coords, path_segments, path_err = find_path_and_coords(graph, td_do, td_huong)
+        route_nodes, route_err = extract_route_from_uplink(df_uplink, td_do, td_huong)
 
-        if path_err:
-            st.error(path_err)
+        if route_err:
+            st.error(route_err)
         else:
-            st.success(f"📌 Đã bóc tách thành công tuyến liên kết Uplink từ **{td_do}** đến **{td_huong}**")
-            
-            # 1. Vẽ đường Uplink liên kết (Xanh lơ)
-            if path_coords:
-                folium.PolyLine(path_coords, color="#00FFFF", weight=5, opacity=0.9, tooltip="Đường Uplink kết nối").add_to(m)
+            st.success(f"📌 Tuyến Uplink bóc tách ({len(route_nodes)} tập điểm): " + " ➔ ".join(route_nodes))
 
-            # 2. Hiển thị độ dài cáp từ DC lên các đoạn
-            for seg in path_segments:
-                if seg['length']:
-                    mid_lat = (seg['coords'][0][0] + seg['coords'][1][0]) / 2
-                    mid_lon = (seg['coords'][0][1] + seg['coords'][1][1]) / 2
-                    folium.Marker(
-                        [mid_lat, mid_lon],
-                        icon=folium.DivIcon(html=f'<div style="font-size: 10pt; color: yellow; font-weight: bold; background-color: rgba(0,0,0,0.6); padding: 2px 4px;">{seg["length"]}m</div>')
+            route_coords = []
+            missing_nodes = []
+
+            # 1. Vẽ CHỈ CÁC TẬP ĐIỂM nằm trong tuyến Uplink này
+            for node in route_nodes:
+                if node in coord_dict:
+                    pos = coord_dict[node]
+                    route_coords.append(pos)
+                    
+                    # Phân loại điểm Gốc / Định hướng / Trung gian để đổi màu icon
+                    if node == clean_node_name(td_do):
+                        icon_color = "green"
+                    elif node == clean_node_name(td_huong):
+                        icon_color = "red"
+                    else:
+                        icon_color = "blue"
+
+                    # Đánh dấu Marker điểm
+                    folium.CircleMarker(
+                        location=pos,
+                        radius=5,
+                        color=icon_color,
+                        fill=True,
+                        fill_color=icon_color,
+                        fill_opacity=1.0,
+                        tooltip=node
                     ).add_to(m)
 
-            # 3. Đánh dấu điểm Gốc & Hướng
-            start_pos = graph.nodes[clean_node_name(td_do)]['pos']
-            end_pos = graph.nodes[clean_node_name(td_huong)]['pos']
-            
-            folium.Marker(start_pos, popup=f"Gốc: {td_do}", icon=folium.Icon(color="green", icon="play")).add_to(m)
-            folium.Marker(end_pos, popup=f"Định hướng: {td_huong}", icon=folium.Icon(color="red", icon="star")).add_to(m)
+                    # Hiển thị TÊN TẬP ĐIỂM trực tiếp lên bản đồ (Giống hình 1)
+                    folium.Marker(
+                        location=pos,
+                        icon=folium.DivIcon(
+                            html=f'<div style="font-size: 9pt; color: #00FFFF; font-weight: bold; font-family: Arial; text-shadow: 1px 1px 2px black; white-space: nowrap;">{node}</div>',
+                            icon_anchor=(-8, 10)
+                        )
+                    ).add_to(m)
+                else:
+                    missing_nodes.append(node)
 
-            # 4. Đường đo đạc đỏ nét đứt + Nhãn khoảng cách
-            folium.PolyLine([start_pos, end_pos], color="red", weight=3, dash_array='5, 10').add_to(m)
-            
-            mid_meas = [(start_pos[0] + end_pos[0])/2, (start_pos[1] + end_pos[1])/2]
-            folium.Marker(
-                mid_meas,
-                icon=folium.DivIcon(html=f'<div style="font-size: 12pt; color: white; font-weight: bold; background-color: rgba(255,0,0,0.8); padding: 2px 6px; border-radius: 3px;">{khoang_cach_input}m</div>')
+            if missing_nodes:
+                st.warning(f"⚠️ Một số điểm trong Uplink không có tọa độ trong GeoJSON: {', '.join(missing_nodes)}")
+
+            # 2. Vẽ đường cáp nối liên tục qua tất cả các điểm trong tuyến (Màu đỏ/Xanh lơ)
+            if len(route_coords) >= 2:
+                folium.PolyLine(
+                    route_coords, 
+                    color="#FF4500", 
+                    weight=4, 
+                    opacity=0.9, 
+                    tooltip="Đường cáp Uplink"
+                ).add_to(m)
+
+                # 3. Đường đo đạc đỏ nét đứt nối trực tiếp Gốc -> Định hướng
+                start_pos = route_coords[0]
+                end_pos = route_coords[-1]
+                folium.PolyLine([start_pos, end_pos], color="yellow", weight=2, dash_array='6, 6').add_to(m)
+
+                # Nhãn hiển thị khoảng cách đo đạc
+                mid_meas = [(start_pos[0] + end_pos[0])/2, (start_pos[1] + end_pos[1])/2]
+                folium.Marker(
+                    mid_meas,
+                    icon=folium.DivIcon(html=f'<div style="font-size: 11pt; color: white; font-weight: bold; background-color: rgba(255,0,0,0.85); padding: 3px 6px; border-radius: 4px;">{khoang_cach_input}m</div>')
+                ).add_to(m)
+
+                # Tự động điều chỉnh góc nhìn (Fit Bounds) vừa khít tuyến cáp
+                m.fit_bounds(route_coords)
+
+    else:
+        # Nếu chưa bấm nút: Hiển thị chấm mờ toàn bộ tập điểm để quan sát tổng quan
+        for name, pos in coord_dict.items():
+            folium.CircleMarker(
+                location=pos, radius=3, color="gray", fill=True, fill_color="gray", fill_opacity=0.5, tooltip=name
             ).add_to(m)
-
-            m.location = mid_meas
 
     folium_static(m, width=1100, height=650)
