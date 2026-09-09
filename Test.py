@@ -2,7 +2,7 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import folium
-from streamlit_folium import st_folium
+from streamlit_folium import folium_static
 from pyproj import Geod
 
 st.set_page_config(layout="wide", page_title="Quản lý Mạng lưới Tập điểm")
@@ -13,7 +13,7 @@ def load_data(geojson_path, excel_path):
     gdf_points = gpd.read_file(geojson_path)
     excel_file = pd.ExcelFile(excel_path)
     sheet_names = excel_file.sheet_names
-    sheet_map = {s.strip().upper(): s for s in sheet_names}
+    sheet_map = {str(s).strip().upper(): s for s in sheet_names}
     
     df_uplink = pd.read_excel(excel_path, sheet_name=sheet_map.get('UPLINK', 0))
     df_dc = pd.read_excel(excel_path, sheet_name=sheet_map['DC']) if 'DC' in sheet_map else pd.DataFrame()
@@ -22,11 +22,14 @@ def load_data(geojson_path, excel_path):
 
 # 2. HÀM TÍNH TỌA ĐỘ
 def calculate_new_point(gdf_points, start_name, dir_name, distance_m):
-    pt_start = gdf_points[gdf_points['name'] == start_name]
-    pt_dir = gdf_points[gdf_points['name'] == dir_name]
+    # Tìm theo cột chứa tên điểm (thường là 'name' hoặc cột đầu tiên)
+    name_col = 'name' if 'name' in gdf_points.columns else gdf_points.columns[0]
+    
+    pt_start = gdf_points[gdf_points[name_col] == start_name]
+    pt_dir = gdf_points[gdf_points[name_col] == dir_name]
     
     if pt_start.empty or pt_dir.empty:
-        return None, None, "Không tìm thấy tên tập điểm!"
+        return None, None, "Không tìm thấy tên tập điểm trong GeoJSON!"
         
     lon1, lat1 = pt_start.geometry.iloc[0].x, pt_start.geometry.iloc[0].y
     lon2, lat2 = pt_dir.geometry.iloc[0].x, pt_dir.geometry.iloc[0].y
@@ -37,7 +40,7 @@ def calculate_new_point(gdf_points, start_name, dir_name, distance_m):
     
     return (end_lat, end_lon), (lat1, lon1), None
 
-# 3. GIAO DIỆN STREAMLIT
+# 3. GIAO DIỆN CHÍNH
 st.title("📍 Hệ thống Tính toán & Hiển thị Mạng lưới Tập điểm")
 
 geojson_file = "data.geojson"
@@ -45,47 +48,64 @@ excel_file = "Data.xlsx"
 
 try:
     gdf_pts, df_uplink, df_dc = load_data(geojson_file, excel_file)
-    list_points = gdf_pts['name'].tolist() if 'name' in gdf_pts.columns else []
+    
+    # Lấy danh sách tên tập điểm
+    name_col = 'name' if 'name' in gdf_pts.columns else gdf_pts.columns[0]
+    list_points = gdf_pts[name_col].astype(str).tolist()
 
-    # Thanh công cụ nhập liệu bên trái
+    # Sidebar nhập liệu
     st.sidebar.header("Thông tin đo đạc")
     td_do = st.sidebar.selectbox("Tập điểm đo (Gốc):", list_points)
     td_huong = st.sidebar.selectbox("Tập điểm định hướng:", [p for p in list_points if p != td_do])
-    khoang_cach = st.sidebar.number_input("Khoảng cách đo (m):", min_value=0.0, value=10.0, step=1.0)
-    
+    khoang_cach = st.sidebar.number_input("Khoảng cách đo (m):", min_value=0.0, value=100.0, step=1.0)
     btn_calc = st.sidebar.button("Tính toán & Vẽ bản đồ")
 
-    # Trung tâm bản đồ
-    center_lat = gdf_pts.geometry.y.mean()
-    center_lon = gdf_pts.geometry.x.mean()
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=15)
+    # Khởi tạo bản đồ với vị trí trung tâm
+    center_lat = float(gdf_pts.geometry.y.mean())
+    center_lon = float(gdf_pts.geometry.x.mean())
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=16)
 
-    # Vẽ mạng lưới từ sheet Uplink
-    coord_dict = {row['name']: (row.geometry.y, row.geometry.x) for _, row in gdf_pts.iterrows() if 'name' in row}
+    # 1. Vẽ các đường liên kết từ sheet Uplink
+    coord_dict = {str(row[name_col]): (row.geometry.y, row.geometry.x) for _, row in gdf_pts.iterrows()}
+    
+    col1_uplink = df_uplink.columns[0]
+    col2_uplink = df_uplink.columns[1]
+    
     for _, row in df_uplink.iterrows():
-        # Điều chỉnh đúng tên 2 cột điểm nối trong file excel của bạn ở đây
-        p1, p2 = row.iloc[0], row.iloc[1] 
+        p1, p2 = str(row[col1_uplink]), str(row[col2_uplink])
         if p1 in coord_dict and p2 in coord_dict:
-            folium.PolyLine([coord_dict[p1], coord_dict[p2]], color="blue", weight=2, opacity=0.6).add_to(m)
+            folium.PolyLine([coord_dict[p1], coord_dict[p2]], color="blue", weight=2, opacity=0.7).add_to(m)
 
-    # Vẽ các tập điểm
+    # 2. Vẽ tất cả Tập điểm lên bản đồ
     for name, coord in coord_dict.items():
-        folium.CircleMarker(location=coord, radius=3, color="black", fill=True, popup=name).add_to(m)
+        folium.CircleMarker(
+            location=coord, 
+            radius=4, 
+            color="black", 
+            fill=True, 
+            fill_opacity=0.8,
+            popup=name
+        ).add_to(m)
 
-    # Xử lý tính toán khi nhấn nút
+    # 3. Tính toán và vẽ kết quả khi bấm nút
     if btn_calc and td_do and td_huong:
         target, start, err = calculate_new_point(gdf_pts, td_do, td_huong, khoang_cach)
         if err:
             st.error(err)
         else:
-            st.success(f"Tọa độ mới: Lat {target[0]:.7f}, Lon {target[1]:.7f}")
-            folium.Marker(start, popup=f"Gốc: {td_do}", icon=folium.Icon(color="green")).add_to(m)
+            st.success(f"📌 Tọa độ điểm mới: **Latitude: {target[0]:.7f} | Longitude: {target[1]:.7f}**")
+            
+            # Marker điểm gốc
+            folium.Marker(start, popup=f"Gốc: {td_do}", icon=folium.Icon(color="green", icon="play")).add_to(m)
+            # Marker điểm mới
             folium.Marker(target, popup="Điểm mới", icon=folium.Icon(color="red", icon="star")).add_to(m)
+            # Đường nối điểm đo
             folium.PolyLine([start, target], color="red", weight=3, dash_array='5, 10').add_to(m)
+            
             m.location = [target[0], target[1]]
 
-    # Hiển thị bản đồ lên web
-    st_folium(m, width="100%", height=600)
+    # Hiển thị bản đồ
+    folium_static(m, width=1100, height=650)
 
 except Exception as e:
-    st.error(f"Đã xảy ra lỗi khi nạp dữ liệu: {e}")
+    st.error(f"Lỗi nạp dữ liệu: {e}")
