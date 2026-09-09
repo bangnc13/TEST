@@ -5,8 +5,7 @@ import folium
 from streamlit_folium import folium_static
 from pyproj import Geod
 from shapely.geometry import Point, LineString, MultiLineString
-from shapely.ops import linemerge, snap, substring
-import networkx as nx
+from shapely.ops import substring
 import requests
 import re
 import os
@@ -17,15 +16,35 @@ st.set_page_config(layout="wide", page_title="Hệ thống Quản lý & Định 
 geod = Geod(ellps="WGS84")
 
 # ==========================================
-# 1. CHUẨN HÓA TÊN TẬP ĐIỂM
+# 1. HÀM CHUẨN HÓA MÃ TẬP ĐIỂM THÔNG MINH
 # ==========================================
+def extract_core_code(raw_name):
+    """
+    Rút gọn tên tập điểm về mã cốt lõi số nguyên:
+    Ví dụ: 'TQGP001.0066/HO' hoặc 'TQGP001.066' -> 'TQGP001.66'
+    """
+    if not raw_name or pd.isna(raw_name):
+        return ""
+    
+    s = str(raw_name).strip().upper()
+    
+    # Lấy phần trước dấu gạch chéo '/' nếu có
+    s_base = s.split('/')[0].strip()
+    
+    # Tìm mẫu TQGPxxx.yyy
+    match = re.search(r'([A-Z]+\d+)\.(\d+)', s_base)
+    if match:
+        prefix = match.group(1)       # Vd: TQGP001
+        number = int(match.group(2))  # Vd: 0066 hoặc 066 -> 66
+        return f"{prefix}.{number}"
+    
+    return s_base
+
 def clean_node_name(raw_name):
     if not raw_name or pd.isna(raw_name):
         return ""
     name = str(raw_name).strip()
-    cleaned = re.sub(r'/(CO|HO|MO|CAP|P|D)/\d+$', r'/\1', name, flags=re.IGNORECASE)
-    if cleaned == name:
-        cleaned = re.sub(r'/\d+$', '', name)
+    cleaned = re.sub(r'/(CO|HO|MO|CAP|P|D|HOI)/\d*$', r'', name, flags=re.IGNORECASE)
     return cleaned
 
 # ==========================================
@@ -62,12 +81,12 @@ def get_segment_length_from_dc(df_dc, node_a, node_b):
     if df_dc is None or df_dc.empty:
         return None
     
-    clean_a = clean_node_name(node_a)
-    clean_b = clean_node_name(node_b)
+    core_a = extract_core_code(node_a)
+    core_b = extract_core_code(node_b)
     
     for idx, row in df_dc.iterrows():
         row_str = " ".join([str(v) for v in row.values if pd.notna(v)])
-        if clean_a in row_str and clean_b in row_str:
+        if core_a in row_str and core_b in row_str:
             for val in row.values:
                 if isinstance(val, (int, float)) and 10 < val < 50000:
                     return float(val)
@@ -77,18 +96,12 @@ def get_segment_length_from_dc(df_dc, node_a, node_b):
 # 4. THUẬT TOÁN BÁM ĐƯỜNG THỰC TẾ (OSRM & GRAPH ROUTING)
 # ==========================================
 def get_route_between_two_points(p1_coord, p2_coord, gdf_lines):
-    """
-    Tìm đường uốn lượn chính xác từ P1 -> P2.
-    1. Tìm trong các đoạn LineString GeoJSON gần nhất
-    2. Nếu GeoJSON bị đứt quãng -> Gọi OSRM Map Matching bám đường thực tế
-    """
     lat1, lon1 = p1_coord
     lat2, lon2 = p2_coord
     
     pt1 = Point(lon1, lat1)
     pt2 = Point(lon2, lat2)
     
-    # Cách A: Dùng Spatial Index & Nearest Line trong GeoJSON
     best_subline = None
     min_dist = float('inf')
     
@@ -108,16 +121,15 @@ def get_route_between_two_points(p1_coord, p2_coord, gdf_lines):
                 if not sub_l.is_empty and sub_l.length > 0:
                     best_subline = sub_l
 
-    # Sửa lỗi: dùng 'and' thay vì 'và'
     if min_dist < 0.001 and best_subline:
         coords = [(lat, lon) for lon, lat in best_subline.coords]
-        d_start = (coords[0][0]-lat1)**2 + (coords[0][0]-lon1)**2
+        d_start = (coords[0][0]-lat1)**2 + (coords[0][1]-lon1)**2
         d_end = (coords[-1][0]-lat1)**2 + (coords[-1][1]-lon1)**2
         if d_end < d_start:
             coords = coords[::-1]
         return coords
 
-    # Cách B: Nếu GeoJSON không chứa đoạn nối liền, dùng OSRM Routing bám đường thực tế
+    # Dự phòng gọi OSRM Map Matching bám theo đường giao thông thực tế
     try:
         url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=full&geometries=geojson"
         res = requests.get(url, timeout=3)
@@ -129,7 +141,6 @@ def get_route_between_two_points(p1_coord, p2_coord, gdf_lines):
     except Exception:
         pass
 
-    # Dự phòng cuối cùng: nối trực tiếp P1 -> P2
     return [p1_coord, p2_coord]
 
 def build_full_curved_path(route_nodes, coord_dict, gdf_lines):
@@ -149,11 +160,11 @@ def build_full_curved_path(route_nodes, coord_dict, gdf_lines):
     return full_path
 
 # ==========================================
-# 5. BÓC TÁCH CHUỖI UPLINK
+# 5. BÓC TÁCH CHUỖI UPLINK (SO SÁNH MỀM CORE CODE)
 # ==========================================
 def extract_route_from_uplink(df_uplink, start_node, end_node):
-    s_clean = clean_node_name(start_node)
-    e_clean = clean_node_name(end_node)
+    core_s = extract_core_code(start_node)
+    core_e = extract_core_code(end_node)
     
     uplink_col = None
     for col in df_uplink.columns:
@@ -170,21 +181,19 @@ def extract_route_from_uplink(df_uplink, start_node, end_node):
         route_str = str(row[uplink_col]) if pd.notna(row[uplink_col]) else ""
         if '=>' in route_str:
             raw_nodes = route_str.split('=>')
-            clean_nodes = [clean_node_name(n) for n in raw_nodes if 'Trung Gian' not in str(n)]
             
-            final_nodes = []
-            for n in clean_nodes:
-                if n and (not final_nodes or final_nodes[-1] != n):
-                    final_nodes.append(n)
+            # Lấy danh sách tên nguyên bản và danh sách mã cốt lõi
+            node_list = [n.strip() for n in raw_nodes if 'Trung Gian' not in str(n)]
+            core_list = [extract_core_code(n) for n in node_list]
 
-            if s_clean in final_nodes and e_clean in final_nodes:
-                idx_s = final_nodes.index(s_clean)
-                idx_e = final_nodes.index(e_clean)
+            if core_s in core_list and core_e in core_list:
+                idx_s = core_list.index(core_s)
+                idx_e = core_list.index(core_e)
                 
                 if idx_s <= idx_e:
-                    sub_route = final_nodes[idx_s : idx_e + 1]
+                    sub_route = node_list[idx_s : idx_e + 1]
                 else:
-                    sub_route = final_nodes[idx_e : idx_s + 1][::-1]
+                    sub_route = node_list[idx_e : idx_s + 1][::-1]
                     
                 return sub_route, None
 
@@ -239,11 +248,19 @@ if err:
 else:
     name_col_json = 'name' if 'name' in gdf_pts.columns else gdf_pts.columns[0]
     
+    # Áp dụng mapping theo mã cốt lõi Core Code
     coord_dict = {}
+    core_map = {}
+    
     for _, row in gdf_pts.iterrows():
         if pd.notna(row[name_col_json]):
             node_name = str(row[name_col_json]).strip()
-            coord_dict[node_name] = (row.geometry.y, row.geometry.x)
+            coord = (row.geometry.y, row.geometry.x)
+            
+            coord_dict[node_name] = coord
+            c_code = extract_core_code(node_name)
+            if c_code:
+                core_map[c_code] = coord
 
     raw_points = gdf_pts[name_col_json].dropna().astype(str).tolist()
     list_points = sorted(list(set([p.strip() for p in raw_points if p.strip()])))
@@ -268,12 +285,23 @@ else:
         if route_err:
             st.error(route_err)
         else:
-            valid_nodes = [n for n in route_nodes if n in coord_dict]
+            # Map tọa độ cho danh sách tập điểm thu được
+            valid_nodes = []
+            valid_coords = {}
+            for n in route_nodes:
+                if n in coord_dict:
+                    valid_nodes.append(n)
+                    valid_coords[n] = coord_dict[n]
+                else:
+                    c_code = extract_core_code(n)
+                    if c_code in core_map:
+                        valid_nodes.append(n)
+                        valid_coords[n] = core_map[c_code]
 
             if len(valid_nodes) < 2:
                 st.error("Không đủ tọa độ tập điểm để vẽ tuyến!")
             else:
-                full_curved_coords = build_full_curved_path(valid_nodes, coord_dict, gdf_lines)
+                full_curved_coords = build_full_curved_path(valid_nodes, valid_coords, gdf_lines)
 
                 dc_length = get_segment_length_from_dc(df_dc, td_do, td_huong)
 
@@ -286,8 +314,8 @@ else:
 
                 # 1. Vẽ các Tập điểm trên tuyến
                 for node in valid_nodes:
-                    pos = coord_dict[node]
-                    icon_color = "green" if node == clean_node_name(td_do) else ("red" if node == clean_node_name(td_huong) else "blue")
+                    pos = valid_coords[node]
+                    icon_color = "green" if extract_core_code(node) == extract_core_code(td_do) else ("red" if extract_core_code(node) == extract_core_code(td_huong) else "blue")
 
                     folium.CircleMarker(
                         location=pos, radius=6, color=icon_color, fill=True, fill_color=icon_color, fill_opacity=1.0, tooltip=node
