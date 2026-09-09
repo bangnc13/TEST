@@ -6,49 +6,39 @@ from streamlit_folium import folium_static
 from pyproj import Geod
 from shapely.geometry import Point, LineString, MultiLineString
 from shapely.ops import substring
-import requests
 import re
 import os
 
-st.set_page_config(layout="wide", page_title="Hệ thống Quản lý & Định vị Vị trí Sự cố Cáp")
+st.set_page_config(layout="wide", page_title="Hệ thống Quản lý & Mô phỏng Tuyến Cáp")
 
 # Trắc địa WGS84
 geod = Geod(ellps="WGS84")
 
 # ==========================================
-# 1. HÀM CHUẨN HÓA MÃ TẬP ĐIỂM THÔNG MINH
+# 1. HÀM CHUẨN HÓA MÃ TẬP ĐIỂM (CORE CODE)
 # ==========================================
 def extract_core_code(raw_name):
     """
-    Rút gọn tên tập điểm về mã cốt lõi số nguyên:
-    Ví dụ: 'TQGP001.0066/HO' hoặc 'TQGP001.066' -> 'TQGP001.66'
+    Rút gọn tên tập điểm về mã cốt lõi:
+    'TQGP001.0198/HO' -> 'TQGP001.198'
+    'TQGP001.0200/CO/2' -> 'TQGP001.200'
     """
     if not raw_name or pd.isna(raw_name):
         return ""
     
     s = str(raw_name).strip().upper()
-    
-    # Lấy phần trước dấu gạch chéo '/' nếu có
     s_base = s.split('/')[0].strip()
     
-    # Tìm mẫu TQGPxxx.yyy
     match = re.search(r'([A-Z]+\d+)\.(\d+)', s_base)
     if match:
-        prefix = match.group(1)       # Vd: TQGP001
-        number = int(match.group(2))  # Vd: 0066 hoặc 066 -> 66
+        prefix = match.group(1)
+        number = int(match.group(2))
         return f"{prefix}.{number}"
     
     return s_base
 
-def clean_node_name(raw_name):
-    if not raw_name or pd.isna(raw_name):
-        return ""
-    name = str(raw_name).strip()
-    cleaned = re.sub(r'/(CO|HO|MO|CAP|P|D|HOI)/\d*$', r'', name, flags=re.IGNORECASE)
-    return cleaned
-
 # ==========================================
-# 2. NẠP DỮ LIỆU & BÓC TÁCH EXCEL & GEOJSON
+# 2. NẠP DỮ LIỆU EXCEL & GEOJSON
 # ==========================================
 @st.cache_data
 def load_data(geojson_path, excel_path):
@@ -67,7 +57,6 @@ def load_data(geojson_path, excel_path):
         
         uplink_sheet = sheet_map.get('UPLINK', sheet_names[0])
         df_uplink = pd.read_excel(excel_path, sheet_name=uplink_sheet)
-        
         df_dc = pd.read_excel(excel_path, sheet_name=sheet_map['DC']) if 'DC' in sheet_map else pd.DataFrame()
 
         return gdf_points, gdf_lines, df_uplink, df_dc, None
@@ -75,92 +64,84 @@ def load_data(geojson_path, excel_path):
         return None, None, None, None, f"Lỗi đọc file: {e}"
 
 # ==========================================
-# 3. LẤY CHIỀU DÀI THỰC TẾ TỪ SHEET DC / EXCEL
+# 3. TRÍCH XUẤT ĐOẠN CÁP UỐN LƯỢN CHỈ TỪ GEOJSON
 # ==========================================
-def get_segment_length_from_dc(df_dc, node_a, node_b):
-    if df_dc is None or df_dc.empty:
-        return None
-    
-    core_a = extract_core_code(node_a)
-    core_b = extract_core_code(node_b)
-    
-    for idx, row in df_dc.iterrows():
-        row_str = " ".join([str(v) for v in row.values if pd.notna(v)])
-        if core_a in row_str and core_b in row_str:
-            for val in row.values:
-                if isinstance(val, (int, float)) and 10 < val < 50000:
-                    return float(val)
-    return None
-
-# ==========================================
-# 4. THUẬT TOÁN BÁM ĐƯỜNG THỰC TẾ (OSRM & GRAPH ROUTING)
-# ==========================================
-def get_route_between_two_points(p1_coord, p2_coord, gdf_lines):
+def get_geojson_cable_segment(p1_coord, p2_coord, gdf_lines):
+    """
+    Chỉ tìm và cắt duy nhất đoạn LineString thuộc GeoJSON bao phủ giữa 2 điểm P1 và P2.
+    Không dùng OSRM hay đường giao thông công cộng.
+    """
     lat1, lon1 = p1_coord
     lat2, lon2 = p2_coord
     
     pt1 = Point(lon1, lat1)
     pt2 = Point(lon2, lat2)
     
-    best_subline = None
-    min_dist = float('inf')
+    best_subline_coords = None
+    min_dist_sum = float('inf')
     
     for _, row in gdf_lines.iterrows():
         geom = row.geometry
         if geom.is_empty:
             continue
+            
         lines = list(geom.geoms) if geom.type == 'MultiLineString' else [geom]
         for line in lines:
-            d = line.distance(pt1) + line.distance(pt2)
-            if d < min_dist:
-                min_dist = d
+            # Tính tổng khoảng cách từ 2 điểm tới đường cáp này
+            d1 = line.distance(pt1)
+            d2 = line.distance(pt2)
+            d_total = d1 + d2
+            
+            if d_total < min_dist_sum:
+                min_dist_sum = d_total
+                
+                # Chiếu 2 điểm lên đường cáp LineString
                 proj1 = line.project(pt1)
                 proj2 = line.project(pt2)
+                
                 start_p, end_p = min(proj1, proj2), max(proj1, proj2)
                 sub_l = substring(line, start_p, end_p)
-                if not sub_l.is_empty and sub_l.length > 0:
-                    best_subline = sub_l
+                
+                if not sub_l.is_empty:
+                    if sub_l.type == 'LineString':
+                        coords = [(lat, lon) for lon, lat in sub_l.coords]
+                    else:
+                        coords = []
+                        for g in sub_l.geoms:
+                            coords.extend([(lat, lon) for lon, lat in g.coords])
+                    
+                    if len(coords) >= 2:
+                        best_subline_coords = coords
 
-    if min_dist < 0.001 and best_subline:
-        coords = [(lat, lon) for lon, lat in best_subline.coords]
-        d_start = (coords[0][0]-lat1)**2 + (coords[0][1]-lon1)**2
-        d_end = (coords[-1][0]-lat1)**2 + (coords[-1][1]-lon1)**2
+    # Nếu tìm thấy đường cáp trong GeoJSON đủ gần
+    if best_subline_coords:
+        # Kiếm tra hướng đi từ P1 -> P2
+        d_start = (best_subline_coords[0][0]-lat1)**2 + (best_subline_coords[0][1]-lon1)**2
+        d_end = (best_subline_coords[-1][0]-lat1)**2 + (best_subline_coords[-1][1]-lon1)**2
         if d_end < d_start:
-            coords = coords[::-1]
-        return coords
+            best_subline_coords = best_subline_coords[::-1]
+        return best_subline_coords
 
-    # Dự phòng gọi OSRM Map Matching bám theo đường giao thông thực tế
-    try:
-        url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=full&geometries=geojson"
-        res = requests.get(url, timeout=3)
-        if res.status_code == 200:
-            data = res.json()
-            if 'routes' in data and len(data['routes']) > 0:
-                osrm_coords = data['routes'][0]['geometry']['coordinates']
-                return [(lat, lon) for lon, lat in osrm_coords]
-    except Exception:
-        pass
-
+    # Nếu không tìm thấy LineString phù hợp, nối trực tiếp 2 điểm
     return [p1_coord, p2_coord]
 
-def build_full_curved_path(route_nodes, coord_dict, gdf_lines):
+def build_pure_geojson_path(route_nodes, valid_coords, gdf_lines):
     full_path = []
     for i in range(len(route_nodes) - 1):
         n1, n2 = route_nodes[i], route_nodes[i+1]
-        if n1 in coord_dict and n2 in coord_dict:
-            p1 = coord_dict[n1]
-            p2 = coord_dict[n2]
-            
-            segment = get_route_between_two_points(p1, p2, gdf_lines)
-            
-            if not full_path:
-                full_path.extend(segment)
-            else:
-                full_path.extend(segment[1:])
+        p1 = valid_coords[n1]
+        p2 = valid_coords[n2]
+        
+        segment = get_geojson_cable_segment(p1, p2, gdf_lines)
+        
+        if not full_path:
+            full_path.extend(segment)
+        else:
+            full_path.extend(segment[1:])
     return full_path
 
 # ==========================================
-# 5. BÓC TÁCH CHUỖI UPLINK (SO SÁNH MỀM CORE CODE)
+# 4. BÓC TÁCH CHUỖI UPLINK
 # ==========================================
 def extract_route_from_uplink(df_uplink, start_node, end_node):
     core_s = extract_core_code(start_node)
@@ -181,8 +162,6 @@ def extract_route_from_uplink(df_uplink, start_node, end_node):
         route_str = str(row[uplink_col]) if pd.notna(row[uplink_col]) else ""
         if '=>' in route_str:
             raw_nodes = route_str.split('=>')
-            
-            # Lấy danh sách tên nguyên bản và danh sách mã cốt lõi
             node_list = [n.strip() for n in raw_nodes if 'Trung Gian' not in str(n)]
             core_list = [extract_core_code(n) for n in node_list]
 
@@ -200,7 +179,7 @@ def extract_route_from_uplink(df_uplink, start_node, end_node):
     return None, f"Không tìm thấy dòng Uplink chứa cả 2 tập điểm {start_node} và {end_node}!"
 
 # ==========================================
-# 6. TÍNH KHOẢNG CÁCH DỒN VÀ TÍNH ĐIỂM SỰ CỐ
+# 5. TÍNH KHOẢNG CÁCH DỒN & ĐỊNH VỊ ĐIỂM SỰ CỐ
 # ==========================================
 def find_point_along_path(coords, target_dist):
     accumulated = 0.0
@@ -234,7 +213,7 @@ def find_point_along_path(coords, target_dist):
     return coords, [coords[-1]], target_coord, total_len
 
 # ==========================================
-# 7. GIAO DIỆN CHÍNH STREAMLIT
+# 6. GIAO DIỆN CHÍNH STREAMLIT
 # ==========================================
 st.title("📍 Hệ thống Quản lý & Mô phỏng Tuyến Cáp Thực Tế")
 
@@ -248,7 +227,6 @@ if err:
 else:
     name_col_json = 'name' if 'name' in gdf_pts.columns else gdf_pts.columns[0]
     
-    # Áp dụng mapping theo mã cốt lõi Core Code
     coord_dict = {}
     core_map = {}
     
@@ -269,12 +247,12 @@ else:
     st.sidebar.header("Thông tin đo đạc OTDR")
     td_do = st.sidebar.selectbox("Tập điểm đo (Gốc):", list_points)
     td_huong = st.sidebar.selectbox("Tập điểm định hướng:", [p for p in list_points if p != td_do])
-    khoang_cach_input = st.sidebar.number_input("Khoảng cách đo trên cáp (m):", min_value=0.0, value=500.0, step=10.0)
+    khoang_cach_input = st.sidebar.number_input("Khoảng cách đo trên cáp (m):", min_value=0.0, value=300.0, step=10.0)
     btn_calc = st.sidebar.button("Tính toán & Mô phỏng đường cáp")
 
     m = folium.Map(
         location=[gdf_pts.geometry.y.mean(), gdf_pts.geometry.x.mean()], 
-        zoom_start=15, 
+        zoom_start=16, 
         tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', 
         attr='Google Satellite'
     )
@@ -285,7 +263,6 @@ else:
         if route_err:
             st.error(route_err)
         else:
-            # Map tọa độ cho danh sách tập điểm thu được
             valid_nodes = []
             valid_coords = {}
             for n in route_nodes:
@@ -301,18 +278,14 @@ else:
             if len(valid_nodes) < 2:
                 st.error("Không đủ tọa độ tập điểm để vẽ tuyến!")
             else:
-                full_curved_coords = build_full_curved_path(valid_nodes, valid_coords, gdf_lines)
-
-                dc_length = get_segment_length_from_dc(df_dc, td_do, td_huong)
+                # CHỈ LẤY ĐƯỜNG CÁP CHÍNH XÁC TỪ GEOJSON (KHÔNG DÙNG OSRM)
+                full_curved_coords = build_pure_geojson_path(valid_nodes, valid_coords, gdf_lines)
 
                 path_meas, path_rem, target_coord, total_len = find_point_along_path(full_curved_coords, khoang_cach_input)
                 
-                info_msg = f"📌 Tổng chiều dài tuyến cáp mô phỏng thực tế: **{total_len:.1f} m** | Khoảng cách đo: **{khoang_cach_input:.1f} m**"
-                if dc_length:
-                    info_msg += f" (Độ dài khai báo trong Sheet DC: **{dc_length:.1f} m**)"
-                st.success(info_msg)
+                st.success(f"📌 Tổng chiều dài tuyến cáp GeoJSON thực tế: **{total_len:.1f} m** | Khoảng cách đo: **{khoang_cach_input:.1f} m**")
 
-                # 1. Vẽ các Tập điểm trên tuyến
+                # 1. Vẽ các Tập điểm
                 for node in valid_nodes:
                     pos = valid_coords[node]
                     icon_color = "green" if extract_core_code(node) == extract_core_code(td_do) else ("red" if extract_core_code(node) == extract_core_code(td_huong) else "blue")
@@ -329,12 +302,12 @@ else:
                         )
                     ).add_to(m)
 
-                # 2. Vẽ ĐOẠN CÁP ĐÃ ĐO (Đỏ uốn lượn chính xác)
+                # 2. Vẽ ĐOẠN CÁP ĐÃ ĐO (Màu đỏ)
                 folium.PolyLine(
                     path_meas, color="#FF0000", weight=5, opacity=0.9, tooltip=f"Đoạn cáp đã đo ({khoang_cach_input}m)"
                 ).add_to(m)
 
-                # 3. Vẽ ĐOẠN CÁP CÒN LẠI (Xanh lơ uốn lượn nét đứt)
+                # 3. Vẽ ĐOẠN CÁP CÒN LẠI (Màu xanh nét đứt)
                 if len(path_rem) >= 2:
                     folium.PolyLine(
                         path_rem, color="#00FFFF", weight=4, opacity=0.8, dash_array='6, 8', tooltip="Đoạn cáp còn lại"
