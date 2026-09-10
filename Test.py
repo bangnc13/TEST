@@ -8,7 +8,7 @@ from streamlit_folium import st_folium
 
 # 1. Hàm tính khoảng cách giữa 2 tọa độ (mét)
 def geodetic_distance(coord1, coord2):
-    R = 6371000.0  # Bán kính Trái Đất (m)
+    R = 6371000.0
     lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
     lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
     dlat, dlon = lat2 - lat1, lon2 - lon1
@@ -36,9 +36,28 @@ def get_point_at_distance(path_coords, target_distance):
         accumulated += seg_dist
     return path_coords[-1]
 
-# Cấu hình trang
-st.set_page_config(page_title="Hệ thống Đo & Tra cứu Tuyến Cáp Quang", layout="wide")
-st.title("🛰️ Hệ thống Đo & Tra cứu Tuyến Cáp Quang")
+# Cấu hình trang Streamlit tràn viền
+st.set_page_config(
+    page_title="Hệ thống Đo & Tra cứu Tuyến Cáp Quang",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Tối ưu giao diện CSS để xóa bỏ lề thừa, mở rộng Bản đồ toàn màn hình
+st.markdown("""
+    <style>
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 0rem;
+            padding-left: 0rem;
+            padding-right: 0rem;
+        }
+        iframe {
+            width: 100% !important;
+            height: calc(100vh - 80px) !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 # Đọc dữ liệu
 @st.cache_data
@@ -82,8 +101,11 @@ all_nodes = set()
 for uplink in bc_df['Thông số Uplink'].dropna():
     all_nodes.update(parse_uplink_chain(uplink))
 
-# --- SIDEBAR ---
-st.sidebar.header("📍 Thông tin đo kiểm")
+# --- ALL INPUTS & RESULTS GO TO SIDEBAR ---
+st.sidebar.title("🛰️ Đo & Tra cứu Cáp Quang")
+st.sidebar.markdown("---")
+st.sidebar.subheader("📍 Thông tin nhập dữ liệu")
+
 start_node = st.sidebar.selectbox("Tập điểm đang đo (Điểm bắt đầu):", options=[""] + sorted(list(all_nodes)))
 
 related_nodes = set()
@@ -97,19 +119,21 @@ if start_node:
 target_node = st.sidebar.selectbox("Đo về Tập điểm (Điểm đích):", options=[""] + sorted(list(related_nodes)))
 measured_length = st.sidebar.number_input("Chiều dài đoạn cáp đo được (mét):", min_value=0.0, value=0.0, step=10.0)
 
-# 🔘 NÚT BẤM THỂ HIỆN KẾT QUẢ ĐO LÊN MAP
-btn_show_map = st.sidebar.button("📌 Thể hiện kết quả đo lên Map", type="primary")
+btn_show_map = st.sidebar.button("📌 Thể hiện kết quả đo lên Map", type="primary", use_container_width=True)
 
-# Tự động lưu trạng thái bấm nút
 if 'show_measured_point' not in st.session_state:
     st.session_state.show_measured_point = False
 
 if btn_show_map:
     st.session_state.show_measured_point = True
 
-# --- XỬ LÝ & HIỂN THỊ ---
+# Lưu biến toàn cục cho bản đồ
+path_coords = []
+map_center = [21.8, 105.2]
+measured_coord = None
+path_found = []
+
 if start_node and target_node:
-    path_found = []
     for uplink in bc_df['Thông số Uplink'].dropna():
         chain = parse_uplink_chain(uplink)
         if start_node in chain and target_node in chain:
@@ -121,47 +145,57 @@ if start_node and target_node:
         total_cable_len = sum(cable_lengths.get((path_found[i], path_found[i+1]), 0.0) for i in range(len(path_found)-1))
         final_accumulated_length = total_cable_len + measured_length
 
-        st.subheader("📊 Kết quả tính toán khoảng cách")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Tổng chiều dài cáp cơ sở", f"{total_cable_len:,.1f} m")
-        c2.metric("Chiều dài cáp đo thêm", f"{measured_length:,.1f} m")
-        c3.metric("Tổng chiều dài tích lũy", f"{final_accumulated_length:,.1f} m")
+        # HIỂN THỊ KẾT QUẢ TÍNH TOÁN NGAY TRONG SIDEBAR
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("📊 Kết quả tính toán")
+        
+        st.sidebar.metric("Chiều dài cáp cơ sở", f"{total_cable_len:,.1f} m")
+        st.sidebar.metric("Chiều dài cáp đo thêm", f"{measured_length:,.1f} m")
+        st.sidebar.metric("Tổng chiều dài tích lũy", f"{final_accumulated_length:,.1f} m")
 
-        # Chuẩn bị tọa độ tuyến
+        # Nút mở chỉ đường Google Maps trên Sidebar
+        start_coord = coords_dict.get(start_node)
+        target_coord = coords_dict.get(target_node)
+        if start_coord and target_coord:
+            gmap_url = f"https://www.google.com/maps/dir/?api=1&origin={start_coord[0]},{start_coord[1]}&destination={target_coord[0]},{target_coord[1]}&travelmode=driving"
+            st.sidebar.markdown(f'👉 [**Mở Google Maps chỉ đường**]({gmap_url})')
+
         path_coords = [coords_dict[node] for node in path_found if node in coords_dict]
+        if path_coords:
+            map_center = path_coords[0]
 
-        map_center = path_coords[0] if path_coords else [21.8, 105.2]
-        m = folium.Map(location=map_center, zoom_start=16, tiles=None)
-
-        folium.TileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google', name='Google Street').add_to(m)
-        folium.TileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
-
-        # Vẽ Marker các tập điểm
-        for node in path_found:
-            if node in coords_dict:
-                color = "red" if node in [start_node, target_node] else "blue"
-                folium.Marker(coords_dict[node], popup=f"<b>{node}</b>", tooltip=node, icon=folium.Icon(color=color)).add_to(m)
-
-        # Vẽ tuyến cáp
-        if len(path_coords) > 1:
-            folium.PolyLine(path_coords, color="red", weight=4, opacity=0.8).add_to(m)
-
-        # 🎯 HIỂN THỊ ĐIỂM ĐO TRÊN MAP KHI BẤM NÚT
         if st.session_state.show_measured_point and measured_length > 0 and path_coords:
             measured_coord = get_point_at_distance(path_coords, measured_length)
             if measured_coord:
-                folium.Marker(
-                    location=measured_coord,
-                    popup=f"<b>Vị trí đo đạc / Sự cố</b><br>Cách {start_node}: {measured_length}m",
-                    tooltip=f"📍 Vị trí đo: {measured_length}m",
-                    icon=folium.Icon(color="orange", icon="warning-sign")
-                ).add_to(m)
-                
-                # Tự động zoom đến vị trí đo đạc
-                m.location = measured_coord
-                st.success(f"📍 Đã định vị thành công điểm đo cách {start_node} khoảng **{measured_length}m** trên bản đồ!")
+                map_center = measured_coord
+                st.sidebar.success(f"📍 Đã định vị điểm đo {measured_length}m!")
 
-        folium.LayerControl().add_to(m)
-        st_folium(m, width=1100, height=550)
-else:
-    st.info("Vui lòng chọn đầy đủ **Tập điểm đang đo** và **Đo về Tập điểm**.")
+# --- FULLSCREEN MAP AT MAIN AREA ---
+m = folium.Map(location=map_center, zoom_start=16, tiles=None)
+
+folium.TileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google', name='Google Street').add_to(m)
+folium.TileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
+
+# Vẽ Marker các điểm
+for node in path_found:
+    if node in coords_dict:
+        color = "red" if node in [start_node, target_node] else "blue"
+        folium.Marker(coords_dict[node], popup=f"<b>{node}</b>", tooltip=node, icon=folium.Icon(color=color)).add_to(m)
+
+# Vẽ tuyến cáp
+if len(path_coords) > 1:
+    folium.PolyLine(path_coords, color="red", weight=5, opacity=0.8).add_to(m)
+
+# Đánh dấu điểm đo đạc
+if measured_coord:
+    folium.Marker(
+        location=measured_coord,
+        popup=f"<b>Vị trí đo đạc / Sự cố</b><br>Cách {start_node}: {measured_length}m",
+        tooltip=f"📍 Vị trí đo: {measured_length}m",
+        icon=folium.Icon(color="orange", icon="warning-sign")
+    ).add_to(m)
+
+folium.LayerControl().add_to(m)
+
+# Mở rộng bản đồ chiếm trọn khung nhìn màn hình chính
+st_folium(m, use_container_width=True, height=720)
