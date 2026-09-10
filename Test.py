@@ -6,17 +6,17 @@ import math
 import folium
 from streamlit_folium import st_folium
 
-# Cấu hình trang Streamlit tràn viền
+# Cấu hình trang Streamlit
 st.set_page_config(
     page_title="Hệ thống Đo & Tra cứu Tuyến Cáp Quang",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Tối ưu CSS để mở rộng bản đồ full tràn viền dưới và bỏ khoảng trắng dư thừa
+# Tối ưu CSS để loại bỏ lề thừa và ép iframe bản đồ tràn viền
 st.markdown("""
     <style>
-        /* Bỏ margin/padding mặc định của trang Streamlit */
+        /* Bỏ margin và padding dư thừa của trang */
         .main .block-container {
             padding-top: 0rem !important;
             padding-bottom: 0rem !important;
@@ -24,11 +24,10 @@ st.markdown("""
             padding-right: 0rem !important;
             max-width: 100% !important;
         }
-        /* Ẩn header mặc định nếu muốn tối ưu diện tích */
-        header[data-testid="stHeader"] {
-            background: transparent;
+        /* Ép khung chứa folium chiếm full màn hình */
+        div[data-testid="stElementContainer"] has(iframe) {
+            height: 100vh !important;
         }
-        /* Ép iframe bản đồ tràn 100% chiều cao màn hình */
         iframe {
             width: 100% !important;
             height: 100vh !important;
@@ -46,7 +45,7 @@ def geodetic_distance(coord1, coord2):
     a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-# 2. Hàm nội suy tìm tọa độ điểm đo cách Start Node một khoảng d (mét)
+# 2. Hàm nội suy vị trí điểm đo cách điểm đầu target_distance (mét)
 def get_point_at_distance(path_coords, target_distance):
     if not path_coords:
         return None
@@ -109,7 +108,7 @@ all_nodes = set()
 for uplink in bc_df['Thông số Uplink'].dropna():
     all_nodes.update(parse_uplink_chain(uplink))
 
-# --- TOÀN BỘ SIDEBAR BÊN TRÁI ---
+# --- BÊN TRÁI: SIDEBAR NHẬP LIỆU & HIỂN THỊ KẾT QUẢ ---
 st.sidebar.title("🛰️ Đo & Tra cứu Cáp Quang")
 st.sidebar.markdown("---")
 st.sidebar.subheader("📍 Thông tin nhập dữ liệu")
@@ -175,7 +174,7 @@ if start_node and target_node:
                 map_center = measured_coord
                 st.sidebar.success(f"📍 Đã định vị điểm đo {measured_length}m!")
 
-# --- BẢN ĐỒ HIỂN THỊ FULL TRÀN VIỀN DƯỚI ---
+# --- BÊN PHẢI: BẢN ĐỒ FULL MÀN HÌNH ---
 m = folium.Map(location=map_center, zoom_start=16, tiles=None)
 
 folium.TileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google', name='Google Street').add_to(m)
@@ -199,5 +198,5 @@ if measured_coord:
 
 folium.LayerControl().add_to(m)
 
-# Truyền height=None để CSS tự kiểm soát 100vh chiều cao
-st_folium(m, use_container_width=True, height=None)
+# Đặt chiều cao px đủ lớn để tránh lỗi rendering iframe
+st_folium(m, use_container_width=True, height=950)
