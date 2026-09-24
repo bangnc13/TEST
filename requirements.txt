@@ -1,9 +1,9 @@
 streamlit
 pandas
-geopandas
+shapely
+geopy
 folium
 streamlit-folium
-geopy
-shapely
 openpyxl
+geopandas
 fiona
