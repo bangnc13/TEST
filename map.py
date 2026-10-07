@@ -1,179 +1,1173 @@
-import streamlit as st
-import pandas as pd
-import geopandas as gpd
-import folium
-from streamlit_folium import st_folium
-import fiona
-
-# Đăng ký driver đọc KML
-fiona.drvsupport.supported_drivers['KML'] = 'rw'
-
-st.set_page_config(layout="wide", page_title="Xác định vị trí đứt cáp")
-
-st.title("📍 Hệ thống xác định vị trí đứt cáp viễn thông")
-
-# Sidebar - Tải file dữ liệu
-st.sidebar.header("📂 Tải lên dữ liệu đầu vào")
-file_geojson = st.sidebar.file_uploader("1. data.geojson (Tập điểm)", type=["geojson", "json"])
-file_excel = st.sidebar.file_uploader("2. Data(1).xlsx (Tải file Excel)", type=["xlsx"])
-file_kml_cot = st.sidebar.file_uploader("3. KML Cột điện (Tùy chọn)", type=["kml"])
-file_kml_tuyen = st.sidebar.file_uploader("4. duong_day.kml (Tùy chọn)", type=["kml"])
-
-def parse_kml(uploaded_file):
-    if uploaded_file is not None:
-        try:
-            return gpd.read_file(uploaded_file, driver='KML')
-        except Exception:
-            return None
-    return None
-
-def find_column_by_keywords(df, keywords):
-    """Hàm tìm cột phù hợp theo từ khóa"""
-    for col in df.columns:
-        col_str = str(col).lower().strip()
-        if any(kw in col_str for kw in keywords):
-            return col
-    return None
-
-if file_geojson and file_excel:
-    try:
-        # Đọc danh sách tất cả các sheet trong file Excel
-        xls = pd.ExcelFile(file_excel)
-        sheet_names = xls.sheet_names
+<!DOCTYPE html>
+<html lang="vi" class="h-full bg-slate-50">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Kiểm Soát Ca Tồn & Checklist (CLL)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- SheetJS (xlsx) for processing Excel & CSV files -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- FontAwesome icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#eff6ff',
+                            100: '#dbeafe',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                        },
+                        paleOlive: {
+                            50: '#f7f9f2',
+                            100: '#e9efdc',
+                            200: '#d4e1bd',
+                            300: '#b7ce96',
+                            400: '#94b36c',
+                            500: '#759948',
+                            600: '#5c7b35',
+                            700: '#465e28',
+                            800: '#3a4e23',
+                            900: '#30411d',
+                            950: '#1c2810'
+                        },
+                        amberYellow: '#fef08a',
+                        amberBorder: '#eab308'
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
         
-        sheet_uplink_name = None
-        sheet_doancap_name = None
-
-        for s in sheet_names:
-            s_clean = str(s).strip().lower()
-            if 'uplink' in s_clean:
-                sheet_uplink_name = s
-            elif any(kw in s_clean for kw in ['đoạn cáp', 'doan cap', 'doancap', 'cap']):
-                sheet_doancap_name = s
-
-        if not sheet_uplink_name and len(sheet_names) > 0:
-            sheet_uplink_name = sheet_names[0]
-        if not sheet_doancap_name and len(sheet_names) > 1:
-            sheet_doancap_name = sheet_names[1]
-
-        # Đọc dữ liệu
-        gdf_tap_diem = gpd.read_file(file_geojson)
-        df_uplink = pd.read_excel(xls, sheet_name=sheet_uplink_name) if sheet_uplink_name else pd.DataFrame()
-        df_doan_cap = pd.read_excel(xls, sheet_name=sheet_doancap_name) if sheet_doancap_name else pd.DataFrame()
-
-        gdf_cot = parse_kml(file_kml_cot)
-        gdf_tuyen = parse_kml(file_kml_tuyen)
-
-        st.sidebar.success(f"Đã đọc xong Excel! (Sheet: '{sheet_uplink_name}')")
-
-        # Xác định cột tên tập điểm trong GeoJSON
-        col_name_geojson = find_column_by_keywords(gdf_tap_diem, ['name', 'ten', 'id', 'matapdiem'])
-        if not col_name_geojson:
-            col_name_geojson = gdf_tap_diem.columns[0]
-
-        # Nhập thông tin sự cố
-        st.sidebar.header("🔍 Nhập thông tin đo OTDR")
-        danh_sach_diem = sorted(gdf_tap_diem[col_name_geojson].dropna().unique().tolist())
+        .col-highlight {
+            background-color: #f7f9f2 !important;
+            border-left: 1px solid #d4e1bd;
+            border-right: 1px solid #d4e1bd;
+        }
+        .dark .col-highlight {
+            background-color: rgba(117, 153, 72, 0.12) !important;
+            border-left: 1px solid rgba(117, 153, 72, 0.3);
+            border-right: 1px solid rgba(117, 153, 72, 0.3);
+        }
         
-        diem_do = st.sidebar.selectbox("Chọn điểm đo:", danh_sach_diem)
-        khoang_cach_do = st.sidebar.number_input("Khoảng cách đo được từ OTDR (mét):", min_value=0.0, value=150.0, step=10.0)
+        .table-olive-theme {
+            background-color: #f7f9f2;
+        }
+        .dark .table-olive-theme {
+            background-color: rgba(117, 153, 72, 0.08);
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateY(-100%); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-toast {
+            animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+    </style>
+</head>
+<body class="h-full text-slate-800 dark:text-slate-100 dark:bg-slate-900 font-sans antialiased flex flex-col">
 
-        # Xử lý tính toán khi bấm nút
-        if st.sidebar.button("Nội suy vị trí đứt"):
-            row_start = gdf_tap_diem[gdf_tap_diem[col_name_geojson] == diem_do]
+    <div id="toastContainer" class="fixed top-4 right-4 z-50 space-y-2 pointer-events-none"></div>
+
+    <!-- MODAL NHẬP PASSWORD BẢO MẬT -->
+    <div id="passwordModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center hidden">
+        <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-6 w-full max-w-sm mx-4 transform transition-all">
+            <div class="flex items-center space-x-3 mb-4">
+                <div class="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400 flex items-center justify-center font-bold">
+                    <i class="fa-solid fa-lock text-lg"></i>
+                </div>
+                <div>
+                    <h3 id="modalTitle" class="text-base font-bold text-slate-900 dark:text-white">Xác thực quyền thao tác</h3>
+                    <p id="modalDesc" class="text-xs text-slate-500 dark:text-slate-400">Vui lòng nhập mật khẩu để tiếp tục</p>
+                </div>
+            </div>
+
+            <div class="space-y-4">
+                <div>
+                    <input type="password" id="importPasswordInput" placeholder="Nhập mật khẩu..." onkeyup="if(event.key==='Enter') verifyPassword()" class="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:text-white">
+                    <p id="passwordError" class="text-xs text-rose-500 mt-1 hidden"><i class="fa-solid fa-circle-exclamation mr-1"></i>Mật khẩu không đúng!</p>
+                </div>
+
+                <div class="flex items-center justify-end space-x-2">
+                    <button onclick="closePasswordModal()" class="px-4 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700 rounded-lg transition">Hủy</button>
+                    <button onclick="verifyPassword()" class="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm">Xác nhận</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <header class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 sticky top-0 z-30 shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-paleOlive-600 to-paleOlive-400 flex items-center justify-center text-white font-bold shadow-md shadow-paleOlive-200 dark:shadow-none">
+                        <i class="fa-solid fa-list-check text-xl"></i>
+                    </div>
+                    <div>
+                        <div class="flex items-center space-x-2">
+                            <h1 class="text-lg font-bold text-slate-900 dark:text-white leading-tight">DASHBOARD KIỂM SOÁT CA TỒN & CHECKLIST</h1>
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-paleOlive-100 text-paleOlive-900 border border-paleOlive-300 dark:bg-paleOlive-900/40 dark:text-paleOlive-200">
+                                Báo Cáo Kiểm Soát
+                            </span>
+                        </div>
+                        <p class="text-xs text-slate-500 dark:text-slate-400">Make by BangNC13</p>
+                    </div>
+                </div>
+
+                <div class="flex items-center space-x-3">
+                    <!-- NÚT ĐỒNG BỘ CÓ BÁO TRẠNG THÁI REALTIME PING -->
+                    <div class="flex items-center space-x-2">
+                        <span class="flex h-2.5 w-2.5 relative" title="Chế độ tự động đồng bộ Realtime đang bật">
+                            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                        </span>
+                        <button id="syncBtn" onclick="fetchGoogleSheetData(true)" class="inline-flex items-center px-3 py-2 text-xs font-semibold rounded-lg text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 transition shadow-sm">
+                            <i id="syncIcon" class="fa-solid fa-arrows-rotate mr-2 text-sm"></i>
+                            <span>Đồng bộ</span>
+                        </button>
+                    </div>
+
+                    <!-- NÚT MỞ MODAL MẬT KHẨU FILE EXCEL -->
+                    <button onclick="openPasswordModal('EXCEL')" class="inline-flex items-center px-3 py-2 text-xs font-medium rounded-lg text-slate-700 bg-slate-100 hover:bg-slate-200 dark:text-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 transition shadow-sm" title="Upload file offline nếu cần">
+                        <i class="fa-solid fa-file-excel text-emerald-600 dark:text-emerald-400 mr-2 text-sm"></i>
+                        <span>File Excel</span>
+                    </button>
+                    <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" class="hidden" onchange="handleFileUpload(event)">
+
+                    <button onclick="exportDataCSV()" class="inline-flex items-center px-3 py-2 text-xs font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 transition shadow-sm">
+                        <i class="fa-solid fa-download mr-1.5"></i> Export Excel
+                    </button>
+
+                    <button onclick="toggleDarkMode()" class="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700 transition" title="Đổi giao diện">
+                        <i class="fa-solid fa-moon dark:hidden text-lg"></i>
+                        <i class="fa-solid fa-sun hidden dark:inline text-lg text-amber-400"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+        <!-- BỘ LỌC QUẢN LÝ TẬP TRUNG -->
+        <div class="bg-gradient-to-r from-paleOlive-100/90 via-paleOlive-50 to-white dark:from-paleOlive-950/60 dark:via-slate-800 dark:to-slate-800 p-4 rounded-xl border-2 border-paleOlive-400 dark:border-paleOlive-600 shadow-md flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+            <div class="flex items-center space-x-3">
+                <div class="w-11 h-11 rounded-xl bg-paleOlive-600 text-white flex items-center justify-center shadow-md shrink-0">
+                    <i class="fa-solid fa-user-shield text-xl"></i>
+                </div>
+                <div>
+                    <div class="flex items-center space-x-2">
+                        <label for="filterColAN" class="text-sm font-bold text-paleOlive-950 dark:text-paleOlive-100 uppercase tracking-wide">
+                            Lọc Theo trưởng bầy
+                        </label>
+                        <span id="activeManagerBadge" class="text-[11px] px-2 py-0.5 rounded-full font-semibold bg-paleOlive-200 text-paleOlive-900 dark:bg-paleOlive-800 dark:text-paleOlive-100">
+                            Tất cả
+                        </span>
+                    </div>
+                    <p class="text-xs text-slate-600 dark:text-slate-400"></p>
+                </div>
+            </div>
+
+            <div class="w-full md:w-80 shrink-0">
+                <div class="relative">
+                    <select id="filterColAN" onchange="onColANChange()" class="w-full py-2.5 pl-3 pr-8 text-xs font-bold bg-white dark:bg-slate-900 border-2 border-paleOlive-500 dark:border-paleOlive-500 text-paleOlive-950 dark:text-paleOlive-100 rounded-xl focus:outline-none focus:ring-2 focus:ring-paleOlive-600 shadow-sm cursor-pointer transition">
+                        <option value="">-- Tất cả Quản lý --</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- KPI Cards Area -->
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div class="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm relative overflow-hidden">
+                <div class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Tổng Ca Tồn</div>
+                <div class="mt-2 flex items-baseline justify-between">
+                    <span id="kpiTotal" class="text-2xl font-bold text-slate-900 dark:text-white">0</span>
+                    <span id="kpiTotalSub" class="text-xs text-blue-600 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300 px-2 py-0.5 rounded-full">Tất cả</span>
+                </div>
+                <div class="mt-2 text-xs text-slate-500 dark:text-slate-400 truncate">Tổng số hợp đồng tồn</div>
+                <div class="absolute bottom-0 left-0 right-0 h-1 bg-blue-500"></div>
+            </div>
+
+            <div class="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm relative overflow-hidden">
+                <div class="text-xs font-medium text-rose-600 dark:text-rose-400 uppercase tracking-wider flex items-center justify-between">
+                    <span>KH Giục Tiến Độ</span>
+                    <i class="fa-solid fa-bullhorn"></i>
+                </div>
+                <div class="mt-2 flex items-baseline justify-between">
+                    <span id="kpiUrgent" class="text-2xl font-bold text-rose-600 dark:text-rose-400">0</span>
+                    <span id="kpiUrgentPct" class="text-xs text-rose-700 bg-rose-50 dark:bg-rose-900/30 dark:text-rose-300 px-2 py-0.5 rounded-full">0%</span>
+                </div>
+                <div class="mt-2 text-xs text-slate-500 dark:text-slate-400 truncate">Có ghi nhận giục tiến độ</div>
+                <div class="absolute bottom-0 left-0 right-0 h-1 bg-rose-500"></div>
+            </div>
+
+            <div class="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm relative overflow-hidden">
+                <div class="text-xs font-medium text-amber-600 dark:text-amber-400 uppercase tracking-wider flex items-center justify-between">
+                    <span>CLL Đang Tồn</span>
+                    <i class="fa-solid fa-rotate-right"></i>
+                </div>
+                <div class="mt-2 flex items-baseline justify-between">
+                    <span id="kpiRepeat" class="text-2xl font-bold text-amber-600 dark:text-amber-400">0</span>
+                    <span id="kpiRepeatCases" class="text-xs text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-300 px-2 py-0.5 rounded-full">0 ca</span>
+                </div>
+                <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">Tổng số ca vụ lặp</div>
+                <div class="absolute bottom-0 left-0 right-0 h-1 bg-amber-500"></div>
+            </div>
+
+            <!-- THẺ TỒN GIỜ ÂM (< 0) -->
+            <div class="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm relative overflow-hidden">
+                <div class="text-xs font-medium text-purple-600 dark:text-purple-400 uppercase tracking-wider flex items-center justify-between">
+                    <span>Số case quá hẹn L1</span>
+                    <i class="fa-solid fa-clock"></i>
+                </div>
+                <div class="mt-2 flex items-baseline justify-between">
+                    <span id="kpiOverdue" class="text-2xl font-bold text-purple-600 dark:text-purple-400">0</span>
+                    <span id="kpiOverduePct" class="text-xs text-purple-700 bg-purple-50 dark:bg-purple-900/30 dark:text-purple-300 px-2 py-0.5 rounded-full">0%</span>
+                </div>
+                <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">Ca vụ quá hẹn L1</div>
+                <div class="absolute bottom-0 left-0 right-0 h-1 bg-purple-500"></div>
+            </div>
+
+            <div class="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm relative overflow-hidden">
+                <div class="text-xs font-medium text-indigo-600 dark:text-indigo-400 uppercase tracking-wider flex items-center justify-between">
+                    <span>Đang Xử Lý</span>
+                    <i class="fa-solid fa-gears"></i>
+                </div>
+                <div class="mt-2 flex items-baseline justify-between">
+                    <span id="kpiProcessing" class="text-2xl font-bold text-indigo-600 dark:text-indigo-400">0</span>
+                    <span id="kpiProcessingPct" class="text-xs text-indigo-700 bg-indigo-50 dark:bg-indigo-900/30 dark:text-indigo-300 px-2 py-0.5 rounded-full">0%</span>
+                </div>
+                <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">Trạng thái Đang XL</div>
+                <div class="absolute bottom-0 left-0 right-0 h-1 bg-indigo-500"></div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-sm font-bold text-slate-900 dark:text-white flex items-center">
+                            <i class="fa-solid fa-chart-pie text-amber-500 mr-2"></i>
+                            1. Thống Kê Checklist Lặp
+                        </h2>
+                        <p class="text-xs text-slate-500 dark:text-slate-400"></p>
+                    </div>
+                </div>
+                <div class="relative flex-1 min-h-[260px]">
+                    <canvas id="chartRepeatPriority"></canvas>
+                </div>
+            </div>
+
+            <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-sm font-bold text-slate-900 dark:text-white flex items-center">
+                            <i class="fa-solid fa-chart-bar text-blue-500 mr-2"></i>
+                            2. Top Block Tồn Ca Nhiều Nhất
+                        </h2>
+                        <p class="text-xs text-slate-500 dark:text-slate-400"></p>
+                    </div>
+                </div>
+                <div class="relative flex-1 min-h-[260px]">
+                    <canvas id="chartTopBlock"></canvas>
+                </div>
+            </div>
+
+            <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-sm font-bold text-slate-900 dark:text-white flex items-center">
+                            <i class="fa-solid fa-network-wired text-emerald-500 mr-2"></i>
+                            3. Tồn theo POP
+                        </h2>
+                        <p class="text-xs text-slate-500 dark:text-slate-400"> </p>
+                    </div>
+                </div>
+                <div class="relative flex-1 min-h-[260px]">
+                    <canvas id="chartTopPop"></canvas>
+                </div>
+            </div>
+
+            <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-sm font-bold text-slate-900 dark:text-white flex items-center">
+                            <i class="fa-solid fa-user-gear text-purple-500 mr-2"></i>
+                            4. Top KTV Tồn Ca nhiều nhất
+                        </h2>
+                        <p class="text-xs text-slate-500 dark:text-slate-400"></p>
+                    </div>
+                </div>
+                <div class="relative flex-1 min-h-[260px]">
+                    <canvas id="chartTopTech"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white dark:bg-slate-800 rounded-xl border border-paleOlive-300 dark:border-paleOlive-700 shadow-sm overflow-hidden">
+            <div class="p-5 border-b border-paleOlive-200 dark:border-paleOlive-800 space-y-4 bg-paleOlive-50/60 dark:bg-paleOlive-950/20">
+                <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                        <h2 class="text-base font-bold text-paleOlive-950 dark:text-paleOlive-100 flex items-center">
+                            <i class="fa-solid fa-table-cells text-paleOlive-600 mr-2"></i>
+                            BẢNG KIỂM SOÁT DỮ LIỆU TỒN CA
+                        </h2>
+                        <p class="text-xs text-paleOlive-800/80 dark:text-paleOlive-300/80"></p>
+                    </div>
+
+                    <div class="flex items-center space-x-2">
+                        <label class="inline-flex items-center space-x-2 text-xs font-semibold text-paleOlive-900 dark:text-paleOlive-200 bg-paleOlive-100 dark:bg-paleOlive-900/50 px-3 py-1.5 rounded-lg cursor-pointer border border-paleOlive-300 dark:border-paleOlive-700 hover:bg-paleOlive-200 dark:hover:bg-paleOlive-800/60 transition shadow-sm">
+                            <input type="checkbox" id="chkNonZero" onchange="applyFilters()" class="w-4 h-4 text-paleOlive-600 rounded border-paleOlive-300 focus:ring-paleOlive-500 dark:bg-slate-800">
+                            <span><i class="fa-solid fa-filter mr-1 text-paleOlive-700 dark:text-paleOlive-300"></i> Chỉ lấy CL Lặp khác 0</span>
+                        </label>
+
+                        <button onclick="resetFilters()" class="px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 dark:text-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 rounded-lg transition">
+                            <i class="fa-solid fa-arrows-rotate mr-1"></i> Xóa Tất Cả Lọc
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2">
+                    <div class="relative sm:col-span-2 lg:col-span-1">
+                        <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
+                        <input type="text" id="searchInput" oninput="applyFilters()" placeholder="Tìm Số HĐ, KH..." class="w-full pl-8 pr-3 py-1.5 text-xs bg-white dark:bg-slate-900 border border-paleOlive-300 dark:border-paleOlive-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-paleOlive-500 dark:text-white">
+                    </div>
+
+                    <div>
+                        <select id="filterTech" onchange="applyFilters()" class="w-full py-1.5 px-3 text-xs bg-white dark:bg-slate-900 border border-paleOlive-300 dark:border-paleOlive-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-paleOlive-500 dark:text-white">
+                            <option value="">Tất cả Nhân sự</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <select id="filterUrgent" onchange="applyFilters()" class="w-full py-1.5 px-3 text-xs bg-white dark:bg-slate-900 border border-paleOlive-300 dark:border-paleOlive-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-paleOlive-500 dark:text-white">
+                            <option value="">Tất cả KH Giục</option>
+                            <option value="YES">Có giục tiến độ</option>
+                            <option value="NO">Không giục tiến độ</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <select id="filterRepeat" onchange="applyFilters()" class="w-full py-1.5 px-3 text-xs bg-white dark:bg-slate-900 border border-paleOlive-300 dark:border-paleOlive-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-paleOlive-500 dark:text-white">
+                            <option value="">Tất cả CL Lặp</option>
+                            <option value="1">Lặp 1 lần</option>
+                            <option value="2">Lặp 2 lần</option>
+                            <option value="3">Lặp ≥ 3 lần</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <select id="filterBlock" onchange="applyFilters()" class="w-full py-1.5 px-3 text-xs bg-white dark:bg-slate-900 border border-paleOlive-300 dark:border-paleOlive-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-paleOlive-500 dark:text-white">
+                            <option value="">Tất cả Block</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse text-xs">
+                    <thead>
+                        <tr class="bg-paleOlive-100 dark:bg-paleOlive-900/60 text-paleOlive-900 dark:text-paleOlive-200 font-bold border-b border-paleOlive-300 dark:border-paleOlive-700 uppercase tracking-wider">
+                            <th class="py-3 px-3 w-12 text-center border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">STT</th>
+                            <th class="py-3 px-3 w-32 border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">Số HĐ</th>
+                            <th class="py-3 px-3 min-w-[140px] border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">Block</th>
+                            <th class="py-3 px-3 text-center w-24 border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">Lần Hẹn</th>
+                            <th class="py-3 px-3 text-center w-24 border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">CL Lặp</th>
+                            <th class="py-3 px-3 min-w-[130px] border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">Nhân Sự</th>
+                            <th class="py-3 px-3 min-w-[150px] border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">Quản Lý</th>
+                            <th class="py-3 px-3 min-w-[140px] border-r border-paleOlive-200/80 dark:border-paleOlive-800/50">KH Giục Tiến Độ</th>
+                            <th class="py-3 px-3 text-center w-24">HẠN CÒN LẠI</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody" class="divide-y divide-paleOlive-200/60 dark:divide-paleOlive-800/40 bg-paleOlive-50/30 dark:bg-paleOlive-950/20">
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- NÚT PHÂN TRANG VÀ THÔNG TIN HIỂN THỊ -->
+            <div class="px-5 py-3 bg-paleOlive-100/50 dark:bg-paleOlive-950/40 border-t border-paleOlive-200 dark:border-paleOlive-800 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-paleOlive-900/80 dark:text-paleOlive-300">
+                <div>
+                    Hiển thị từ <span id="startIndex" class="font-bold text-paleOlive-950 dark:text-paleOlive-100">0</span> đến <span id="endIndex" class="font-bold text-paleOlive-950 dark:text-paleOlive-100">0</span> trong tổng số <span id="totalCount" class="font-bold text-paleOlive-950 dark:text-paleOlive-100">0</span> ca tồn
+                </div>
+                
+                <div id="paginationControls" class="flex items-center space-x-1">
+                    <!-- JS sẽ tự động vẽ nút phân trang ở đây -->
+                </div>
+
+                <div class="italic">
+                    BangNC13-TQG.
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <footer class="bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 mt-8 py-4">
+        <div class="max-w-7xl mx-auto px-4 text-center text-xs text-slate-500 dark:text-slate-400">
+            Dashboard Kiểm Soát Ca Tồn & Checklist &bull; BangNC13-TQG
+        </div>
+    </footer>
+
+    <script>
+        const DEFAULT_PASSWORD = "1900"; // Mật khẩu mặc định
+        const LOCAL_STORAGE_KEY = "TQG_DASHBOARD_DATASET"; // Key lưu vết vào localStorage
+        
+        const PAGE_SIZE = 10;
+        let currentPage = 1;
+        let pendingAction = null;
+
+        const managerMapping = {
+            "TQGTI.GIANGVH2": "ANHHV15",
+            "TQGTI.THANHNV41": "ANHHV15",
+            "TQGTI.CAONB": "ANHHV15",
+            "TQGTI.KHANHLQ1": "ANHHV15",
+            "TQGTI.CUHA": "HUONGTT33",
+            "TQGTI.QUANDM2": "HUONGTT33",
+            "TQGTI.ANHPH3": "HUONGTT33",
+            "TQGTI.HOANQV": "HUONGTT33",
+            "TQGTI.CHIENMM": "HUONGTT33",
+            "TQGTI.HUNGDQ5": "HUONGTT33",
+            "TQGTI.CUONGLM8": "LYHK7",
+            "TQGTI.NGHIANV6": "LYHK7",
+            "TQGTI.CONGND4": "LYHK7",
+            "TQGTI.QUYETNT1": "TAMVTT5",
+            "TQGTI.BINHLV6": "TAMVTT5",
+            "TQGTI.DUNGNT26": "TAMVTT5",
+            "TQGTI.QUANHV1": "TAMVTT5",
+            "TQGTI.HIEUNV38": "HANGVTT12",
+            "TQGTI.HUYNHNX": "HANGVTT12",
+            "TQGTI.HANHPB": "HANGVTT12",
+            "TQGTI.GIANGLV2": "HANGVTT12",
+            "TQGTI.NAMVD2": "TRANGDTH35",
+            "TQGTI.THANHNV8": "TRANGDTH35",
+            "TQGTI.TUANQD": "TRANGDTH35",
+            "TQGTI.CUORGDD9": "TRANGDTH35",
+            "TQGTI.DANGNV": "TRANGHT28",
+            "TQGTI.BINHTH1": "TRANGHT28",
+            "TQGTI.TRUNGNX3": "TRANGHT28",
+            "TQGTI.TUNGDT4": "TRANGHT28",
+            "TQGTI.TIENVT3": "UYENHT15",
+            "TQGTI.LUCMDC": "UYENHT15",
+            "TQGTI.CAOTT": "UYENHT15",
+            "TQGTI.TUANLQ2": "UYENHT15",
+            "TQGTI.HUNGCV4": "UYENHT15"
+        };
+
+        const GOOGLE_SHEET_ID = '1qKW7OcGegD1IXcgV5WYXuzcUzYvpjZw-CqgzpYDLKoM';
+
+        let currentDataset = [];
+        let chartRepeatPriority = null;
+        let chartTopBlock = null;
+        let chartTopPop = null;
+        let chartTopTech = null;
+
+        function openPasswordModal(actionType = 'EXCEL') {
+            pendingAction = actionType;
+            document.getElementById('importPasswordInput').value = '';
+            document.getElementById('passwordError').classList.add('hidden');
             
-            if not row_start.empty:
-                geom_start = row_start.geometry.values[0]
-                lon_start, lat_start = geom_start.x, geom_start.y
+            const titleEl = document.getElementById('modalTitle');
+            const descEl = document.getElementById('modalDesc');
 
-                diem_tiep_theo = None
+            if (titleEl) titleEl.textContent = 'Import File Excel';
+            if (descEl) descEl.textContent = 'Vui lòng nhập mật khẩu để import File Excel';
 
-                # Tìm kiếm điểm tiếp theo trong Sheet Uplink
-                if not df_uplink.empty:
-                    # Chuyển toàn bộ dữ liệu dạng chuỗi để so sánh chính xác
-                    df_up_clean = df_uplink.astype(str).apply(lambda x: x.str.strip())
-                    target_str = str(diem_do).strip()
+            document.getElementById('passwordModal').classList.remove('hidden');
+            setTimeout(function() { document.getElementById('importPasswordInput').focus(); }, 100);
+        }
 
-                    # Lặp qua các hàng để tìm hàng chứa 'diem_do'
-                    for idx, row in df_up_clean.iterrows():
-                        row_vals = row.tolist()
-                        if target_str in row_vals:
-                            pos = row_vals.index(target_str)
-                            # Ưu tiên lấy ô bên phải (hướng xuôi), nếu ở cuối thì lấy ô bên trái (hướng ngược)
-                            if pos + 1 < len(row_vals) and row_vals[pos + 1] != 'nan':
-                                diem_tiep_theo = row_vals[pos + 1]
-                                break
-                            elif pos - 1 >= 0 and row_vals[pos - 1] != 'nan':
-                                diem_tiep_theo = row_vals[pos - 1]
-                                break
+        function closePasswordModal() {
+            document.getElementById('passwordModal').classList.add('hidden');
+            pendingAction = null;
+        }
 
-                if diem_tiep_theo:
-                    row_next = gdf_tap_diem[gdf_tap_diem[col_name_geojson] == diem_tiep_theo]
+        function verifyPassword() {
+            const inputPwd = document.getElementById('importPasswordInput').value;
+            if (inputPwd === DEFAULT_PASSWORD) {
+                const action = pendingAction;
+                closePasswordModal();
+                if (action === 'EXCEL') {
+                    document.getElementById('excelFileInput').click();
+                }
+            } else {
+                document.getElementById('passwordError').classList.remove('hidden');
+            }
+        }
 
-                    if not row_next.empty:
-                        geom_next = row_next.geometry.values[0]
-                        lon_next, lat_next = geom_next.x, geom_next.y
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            if (!container) return;
+            const toast = document.createElement('div');
+            const bgColors = {
+                success: 'bg-emerald-600 text-white',
+                error: 'bg-rose-600 text-white',
+                info: 'bg-slate-800 text-white dark:bg-slate-700'
+            };
+            const icons = {
+                success: 'fa-circle-check',
+                error: 'fa-circle-exclamation',
+                info: 'fa-circle-info'
+            };
+            toast.className = 'flex items-center space-x-2 px-4 py-3 rounded-xl shadow-lg text-xs font-medium animate-toast ' + (bgColors[type] || bgColors.info) + ' pointer-events-auto';
+            toast.innerHTML = '<i class="fa-solid ' + (icons[type] || icons.info) + ' text-sm"></i><span>' + message + '</span>';
+            container.appendChild(toast);
+            setTimeout(function() {
+                toast.style.opacity = '0';
+                toast.style.transition = 'opacity 0.3s ease';
+                setTimeout(function() { toast.remove(); }, 300);
+            }, 3000);
+        }
 
-                        # Tự động lấy chiều dài đoạn cáp
-                        chieu_dai_doan = 500.0  # Mặc định 500m nếu không có dữ liệu
-                        if not df_doan_cap.empty:
-                            df_cap_clean = df_doan_cap.astype(str).apply(lambda x: x.str.strip())
-                            for idx, row in df_cap_clean.iterrows():
-                                row_vals = row.tolist()
-                                if target_str in row_vals and str(diem_tiep_theo).strip() in row_vals:
-                                    # Tìm cột chứa giá trị số (độ dài)
-                                    for item in row_vals:
-                                        try:
-                                            val = float(item)
-                                            if val > 0:
-                                                chieu_dai_doan = val
-                                                break
-                                        except ValueError:
-                                            continue
-                                    break
+        function populateFilterOptions() {
+            const colANSelect = document.getElementById('filterColAN');
+            const techSelect = document.getElementById('filterTech');
+            const blockSelect = document.getElementById('filterBlock');
 
-                        # Nội suy vị trí đứt cáp
-                        ratio = min(khoang_cach_do / chieu_dai_doan, 1.0) if chieu_dai_doan > 0 else 0
-                        lat_break = lat_start + ratio * (lat_next - lat_start)
-                        lon_break = lon_start + ratio * (lon_next - lon_start)
+            if (!colANSelect || !techSelect || !blockSelect) return;
 
-                        # Hiển thị kết quả
-                        st.subheader("📌 Kết quả xác định vị trí:")
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Tập điểm đo", diem_do)
-                        col2.metric("Hướng về tập điểm", diem_tiep_theo)
-                        col3.metric("Tọa độ đứt cáp", f"{lat_break:.6f}, {lon_break:.6f}")
+            const currentAN = colANSelect.value;
+            const currentTech = techSelect.value;
+            const currentBlock = blockSelect.value;
 
-                        # Hiển thị Bản đồ
-                        m = folium.Map(location=[lat_start, lon_start], zoom_start=17)
+            const managers = [...new Set(currentDataset.map(function(d) { return d["Cột AN"]; }).filter(Boolean))].sort();
+            const techs = [...new Set(currentDataset.map(function(d) { return d["Nhân sự"]; }).filter(Boolean))].sort();
+            const blocks = [...new Set(currentDataset.map(function(d) { return d["Block"]; }).filter(Boolean))].sort();
 
-                        if gdf_tuyen is not None:
-                            folium.GeoJson(gdf_tuyen, name="Đường dây KML", style_function=lambda x: {'color': 'blue', 'weight': 2}).add_to(m)
+            colANSelect.innerHTML = '<option value="">-- Tất cả Quản lý --</option>' + 
+                managers.map(function(m) { return '<option value="' + m + '">' + m + '</option>'; }).join('');
+            colANSelect.value = currentAN;
 
-                        if gdf_cot is not None:
-                            for _, row in gdf_cot.iterrows():
-                                if row.geometry and row.geometry.type == 'Point':
-                                    folium.CircleMarker(
-                                        location=[row.geometry.y, row.geometry.x],
-                                        radius=3, color='gray', fill=True
-                                    ).add_to(m)
+            techSelect.innerHTML = '<option value="">Tất cả Nhân sự</option>' + 
+                techs.map(function(t) { return '<option value="' + t + '">' + t + '</option>'; }).join('');
+            techSelect.value = currentTech;
 
-                        folium.Marker([lat_start, lon_start], popup=f"Điểm đo: {diem_do}", icon=folium.Icon(color='blue', icon='play')).add_to(m)
-                        folium.Marker([lat_next, lon_next], popup=f"Tập điểm đích: {diem_tiep_theo}", icon=folium.Icon(color='green', icon='stop')).add_to(m)
-                        folium.Marker([lat_break, lon_break], popup=f"💥 VỊ TRÍ ĐỨT ({khoang_cach_do}m)", icon=folium.Icon(color='red', icon='warning-sign')).add_to(m)
+            blockSelect.innerHTML = '<option value="">Tất cả Block</option>' + 
+                blocks.map(function(b) { return '<option value="' + b + '">' + b + '</option>'; }).join('');
+            blockSelect.value = currentBlock;
+        }
 
-                        folium.PolyLine([(lat_start, lon_start), (lat_next, lon_next)], color="gray", weight=3, dash_array='5, 5').add_to(m)
-                        folium.PolyLine([(lat_start, lon_start), (lat_break, lon_break)], color="red", weight=5).add_to(m)
+        function onColANChange() {
+            const managerVal = document.getElementById('filterColAN').value;
+            const badge = document.getElementById('activeManagerBadge');
+            if (badge) {
+                badge.textContent = managerVal || 'Tất cả';
+            }
+            applyFilters();
+        }
 
-                        st_folium(m, width="100%", height=550)
+        function resetFilters() {
+            document.getElementById('filterColAN').value = '';
+            document.getElementById('searchInput').value = '';
+            document.getElementById('filterTech').value = '';
+            document.getElementById('filterUrgent').value = '';
+            document.getElementById('filterRepeat').value = '';
+            document.getElementById('filterBlock').value = '';
+            document.getElementById('chkNonZero').checked = false;
+            
+            const badge = document.getElementById('activeManagerBadge');
+            if (badge) badge.textContent = 'Tất cả';
 
-                    else:
-                        st.error(f"Không tìm thấy tọa độ cho tập điểm kết nối: {diem_tiep_theo}")
-                else:
-                    st.error(f"Không tìm thấy hướng liên kết nào cho điểm đo: {diem_do} trong Sheet Uplink.")
-            else:
-                st.error("Không tìm thấy điểm đo trong file GeoJSON.")
-    except Exception as e:
-        st.error(f"Đã xảy ra lỗi khi xử lý dữ liệu: {e}")
-else:
-    st.info("👋 Vui lòng tải lên các file dữ liệu ở thanh menu bên trái.")
+            applyFilters();
+        }
+
+        function getFilteredData() {
+            const managerFilter = document.getElementById('filterColAN')?.value || '';
+            const searchFilter = document.getElementById('searchInput')?.value?.toLowerCase().trim() || '';
+            const techFilter = document.getElementById('filterTech')?.value || '';
+            const urgentFilter = document.getElementById('filterUrgent')?.value || '';
+            const repeatFilter = document.getElementById('filterRepeat')?.value || '';
+            const blockFilter = document.getElementById('filterBlock')?.value || '';
+            const chkNonZero = document.getElementById('chkNonZero')?.checked || false;
+
+            return currentDataset.filter(function(item) {
+                if (managerFilter && item["Cột AN"] !== managerFilter) return false;
+                if (techFilter && item["Nhân sự"] !== techFilter) return false;
+                if (blockFilter && item["Block"] !== blockFilter) return false;
+
+                if (chkNonZero && item["CL Lặp"] === 0) return false;
+
+                if (urgentFilter) {
+                    const hasUrgent = Boolean(item["KH Giục Tiến Độ"] && item["KH Giục Tiến Độ"].toString().trim() !== '');
+                    if (urgentFilter === 'YES' && !hasUrgent) return false;
+                    if (urgentFilter === 'NO' && hasUrgent) return false;
+                }
+
+                if (repeatFilter) {
+                    if (repeatFilter === '1' && item["CL Lặp"] !== 1) return false;
+                    if (repeatFilter === '2' && item["CL Lặp"] !== 2) return false;
+                    if (repeatFilter === '3' && item["CL Lặp"] < 3) return false;
+                }
+
+                if (searchFilter) {
+                    const matchSoHD = item["Số HĐ"]?.toLowerCase().includes(searchFilter);
+                    const matchName = item["Tên đầy đủ"]?.toLowerCase().includes(searchFilter);
+                    const matchUrgent = item["KH Giục Tiến Độ"]?.toLowerCase().includes(searchFilter);
+                    if (!matchSoHD && !matchName && !matchUrgent) return false;
+                }
+
+                return true;
+            });
+        }
+
+        function applyFilters() {
+            currentPage = 1;
+            const filtered = getFilteredData();
+            updateKPIs(filtered);
+            renderCharts(filtered);
+            renderTable(filtered);
+        }
+
+        function updateKPIs(data) {
+            const total = data.length;
+            const repeatCases = data.filter(function(d) { return (d["CL Lặp"] || 0) > 0; });
+            const totalRepeatCasesCount = repeatCases.length;
+            
+            const negativeCases = data.filter(function(d) { return (d["Hạn còn lại"] || 0) < 0; }).length;
+            const processingCases = data.filter(function(d) { return d["TTCL"] === 'Đang XL'; }).length;
+            const urgentCases = data.filter(function(d) { return d["KH Giục Tiến Độ"] && d["KH Giục Tiến Độ"].toString().trim() !== ''; }).length;
+
+            document.getElementById('kpiTotal').textContent = total;
+            document.getElementById('kpiUrgent').textContent = urgentCases;
+            document.getElementById('kpiUrgentPct').textContent = total ? Math.round((urgentCases / total) * 100) + '%' : '0%';
+            document.getElementById('kpiRepeat').textContent = totalRepeatCasesCount;
+            document.getElementById('kpiRepeatCases').textContent = totalRepeatCasesCount + ' ca';
+            document.getElementById('kpiOverdue').textContent = negativeCases;
+            document.getElementById('kpiOverduePct').textContent = total ? Math.round((negativeCases / total) * 100) + '%' : '0%';
+            document.getElementById('kpiProcessing').textContent = processingCases;
+            document.getElementById('kpiProcessingPct').textContent = total ? Math.round((processingCases / total) * 100) + '%' : '0%';
+        }
+
+        function goToPage(page) {
+            currentPage = page;
+            const filtered = getFilteredData();
+            renderTable(filtered);
+        }
+
+        function renderTable(data) {
+            const tbody = document.getElementById('tableBody');
+            const total = data.length;
+            const totalPages = Math.ceil(total / PAGE_SIZE) || 1;
+
+            if (currentPage > totalPages) currentPage = totalPages;
+            if (currentPage < 1) currentPage = 1;
+
+            const startIdx = (currentPage - 1) * PAGE_SIZE;
+            const endIdx = Math.min(startIdx + PAGE_SIZE, total);
+
+            document.getElementById('startIndex').textContent = total > 0 ? startIdx + 1 : 0;
+            document.getElementById('endIndex').textContent = endIdx;
+            document.getElementById('totalCount').textContent = total;
+
+            renderPagination(totalPages);
+
+            if (!tbody) return;
+
+            if (total === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="py-8 text-center text-slate-400 italic">Không tìm thấy ca tồn nào phù hợp với bộ lọc</td></tr>';
+                return;
+            }
+
+            const pageData = data.slice(startIdx, endIdx);
+
+            tbody.innerHTML = pageData.map(function(item, idx) {
+                const isRepeat = (item["CL Lặp"] || 0) > 0;
+                const isNegative = (item["Hạn còn lại"] || 0) < 0;
+                const urgentVal = item["KH Giục Tiến Độ"] ? item["KH Giục Tiến Độ"].toString().trim() : '';
+
+                const repeatBadge = isRepeat
+                    ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-900 dark:bg-amber-900/60 dark:text-amber-200">' + item["CL Lặp"] + '</span>'
+                    : '<span class="text-slate-400">0</span>';
+
+                const urgentBadge = urgentVal
+                    ? '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold bg-rose-100 text-rose-800 dark:bg-rose-900/50 dark:text-rose-200 border border-rose-300 dark:border-rose-700"><i class="fa-solid fa-triangle-exclamation mr-1 text-[10px]"></i>' + urgentVal + '</span>'
+                    : '<span class="text-slate-400 font-normal">-</span>';
+
+                const tonGioClass = isNegative ? 'text-rose-600 font-bold dark:text-rose-400' : 'text-slate-600 dark:text-slate-300';
+                const tonGioDisplay = (item["Hạn còn lại"] !== undefined && item["Hạn còn lại"] !== null && item["Hạn còn lại"] !== '') ? item["Hạn còn lại"] : 0;
+
+                return '<tr class="hover:bg-paleOlive-100/50 dark:hover:bg-paleOlive-900/30 transition border-b border-paleOlive-200/50 dark:border-paleOlive-800/30">' +
+                    '<td class="py-2.5 px-3 text-center text-slate-500 font-medium">' + (startIdx + idx + 1) + '</td>' +
+                    '<td class="py-2.5 px-3 font-semibold text-blue-600 dark:text-blue-400">' + (item["Số HĐ"] || '-') + '</td>' +
+                    '<td class="py-2.5 px-3 text-slate-800 dark:text-slate-200 font-medium">' + (item["Block"] || '-') + '</td>' +
+                    '<td class="py-2.5 px-3 text-center text-slate-700 dark:text-slate-300">' + (item["Số lần hẹn"] || 0) + '</td>' +
+                    '<td class="py-2.5 px-3 text-center col-highlight font-semibold">' + repeatBadge + '</td>' +
+                    '<td class="py-2.5 px-3 font-medium text-slate-700 dark:text-slate-300">' + (item["Nhân sự"] || '-') + '</td>' +
+                    '<td class="py-2.5 px-3 font-medium text-paleOlive-900 dark:text-paleOlive-200 col-highlight">' + (item["Cột AN"] || '-') + '</td>' +
+                    '<td class="py-2.5 px-3 font-medium text-rose-600 dark:text-rose-400">' + urgentBadge + '</td>' +
+                    '<td class="py-2.5 px-3 text-center ' + tonGioClass + '">' + tonGioDisplay + 'h</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function renderPagination(totalPages) {
+            const container = document.getElementById('paginationControls');
+            if (!container) return;
+
+            if (totalPages <= 1) {
+                container.innerHTML = '';
+                return;
+            }
+
+            let html = '';
+
+            html += '<button onclick="goToPage(' + (currentPage - 1) + ')" ' + (currentPage === 1 ? 'disabled' : '') + ' class="px-2.5 py-1 rounded-md bg-white dark:bg-slate-800 border border-paleOlive-300 dark:border-paleOlive-700 text-paleOlive-950 dark:text-paleOlive-100 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-paleOlive-100 dark:hover:bg-slate-700 transition">' +
+                '<i class="fa-solid fa-chevron-left"></i>' +
+            '</button>';
+
+            let startPage = Math.max(1, currentPage - 2);
+            let endPage = Math.min(totalPages, currentPage + 2);
+
+            if (startPage > 1) {
+                html += '<button onclick="goToPage(1)" class="px-2.5 py-1 rounded-md bg-white dark:bg-slate-800 border border-paleOlive-300 dark:border-paleOlive-700 text-paleOlive-950 dark:text-paleOlive-100 hover:bg-paleOlive-100 dark:hover:bg-slate-700 transition">1</button>';
+                if (startPage > 2) html += '<span class="px-1 text-slate-400">...</span>';
+            }
+
+            for (let p = startPage; p <= endPage; p++) {
+                const isActive = p === currentPage;
+                const activeClass = isActive 
+                    ? 'bg-paleOlive-600 text-white font-bold border-paleOlive-600' 
+                    : 'bg-white dark:bg-slate-800 border-paleOlive-300 dark:border-paleOlive-700 text-paleOlive-950 dark:text-paleOlive-100 hover:bg-paleOlive-100 dark:hover:bg-slate-700';
+
+                html += '<button onclick="goToPage(' + p + ')" class="px-2.5 py-1 rounded-md border ' + activeClass + ' transition">' + p + '</button>';
+            }
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) html += '<span class="px-1 text-slate-400">...</span>';
+                html += '<button onclick="goToPage(' + totalPages + ')" class="px-2.5 py-1 rounded-md bg-white dark:bg-slate-800 border border-paleOlive-300 dark:border-paleOlive-700 text-paleOlive-950 dark:text-paleOlive-100 hover:bg-paleOlive-100 dark:hover:bg-slate-700 transition">' + totalPages + '</button>';
+            }
+
+            html += '<button onclick="goToPage(' + (currentPage + 1) + ')" ' + (currentPage === totalPages ? 'disabled' : '') + ' class="px-2.5 py-1 rounded-md bg-white dark:bg-slate-800 border border-paleOlive-300 dark:border-paleOlive-700 text-paleOlive-950 dark:text-paleOlive-100 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-paleOlive-100 dark:hover:bg-slate-700 transition">' +
+                '<i class="fa-solid fa-chevron-right"></i>' +
+            '</button>';
+
+            container.innerHTML = html;
+        }
+
+        function renderCharts(data) {
+            const isDark = document.documentElement.classList.contains('dark');
+            const textColor = isDark ? '#94a3b8' : '#475569';
+            const gridColor = isDark ? 'rgba(148, 163, 184, 0.1)' : 'rgba(203, 213, 225, 0.4)';
+
+            const hasRepeat = data.filter(function(d) { return (d["CL Lặp"] || 0) > 0; }).length;
+            const noRepeat = data.filter(function(d) { return (d["CL Lặp"] || 0) === 0; }).length;
+
+            if (chartRepeatPriority) chartRepeatPriority.destroy();
+            const ctx1 = document.getElementById('chartRepeatPriority')?.getContext('2d');
+            if (ctx1) {
+                chartRepeatPriority = new Chart(ctx1, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Có CL Lặp (>0)', 'Không Lặp (=0)'],
+                        datasets: [{
+                            data: [hasRepeat, noRepeat],
+                            backgroundColor: ['#f59e0b', '#3b82f6'],
+                            borderWidth: 2,
+                            borderColor: isDark ? '#1e293b' : '#ffffff'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { 
+                                    color: textColor, 
+                                    font: { family: 'Inter', size: 11 },
+                                    padding: 15
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const label = context.label || '';
+                                        const value = context.raw || 0;
+                                        const total = hasRepeat + noRepeat;
+                                        const percentage = total > 0 ? Math.round((value / total) * 100) : 0;
+                                        return ' ' + label + ': ' + value + ' ca (' + percentage + '%)';
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            const blockMap = {};
+            data.forEach(function(d) {
+                if (d["Block"]) blockMap[d["Block"]] = (blockMap[d["Block"]] || 0) + 1;
+            });
+            const sortedBlocks = Object.entries(blockMap).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 8);
+
+            if (chartTopBlock) chartTopBlock.destroy();
+            const ctx2 = document.getElementById('chartTopBlock')?.getContext('2d');
+            if (ctx2) {
+                chartTopBlock = new Chart(ctx2, {
+                    type: 'bar',
+                    data: {
+                        labels: sortedBlocks.map(function(b) { return b[0]; }),
+                        datasets: [{
+                            label: 'Số ca tồn',
+                            data: sortedBlocks.map(function(b) { return b[1]; }),
+                            backgroundColor: '#0284c7',
+                            borderRadius: 6
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { ticks: { color: textColor }, grid: { color: gridColor }, beginAtZero: true },
+                            y: { ticks: { color: textColor }, grid: { display: false } }
+                        }
+                    }
+                });
+            }
+
+            const popMap = {};
+            data.forEach(function(d) {
+                if (d["POP"]) popMap[d["POP"]] = (popMap[d["POP"]] || 0) + 1;
+            });
+            const sortedPops = Object.entries(popMap).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 8);
+
+            if (chartTopPop) chartTopPop.destroy();
+            const ctx3 = document.getElementById('chartTopPop')?.getContext('2d');
+            if (ctx3) {
+                chartTopPop = new Chart(ctx3, {
+                    type: 'bar',
+                    data: {
+                        labels: sortedPops.map(function(p) { return p[0]; }),
+                        datasets: [{
+                            label: 'Số ca tồn',
+                            data: sortedPops.map(function(p) { return p[1]; }),
+                            backgroundColor: '#10b981',
+                            borderRadius: 6
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { ticks: { color: textColor }, grid: { display: false } },
+                            y: { ticks: { color: textColor }, grid: { color: gridColor }, beginAtZero: true }
+                        }
+                    }
+                });
+            }
+
+            const techMap = {};
+            data.forEach(function(d) {
+                if (d["Nhân sự"]) techMap[d["Nhân sự"]] = (techMap[d["Nhân sự"]] || 0) + 1;
+            });
+            const sortedTechs = Object.entries(techMap).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 8);
+
+            if (chartTopTech) chartTopTech.destroy();
+            const ctx4 = document.getElementById('chartTopTech')?.getContext('2d');
+            if (ctx4) {
+                chartTopTech = new Chart(ctx4, {
+                    type: 'bar',
+                    data: {
+                        labels: sortedTechs.map(function(t) { return t[0]; }),
+                        datasets: [{
+                            label: 'Số ca tồn',
+                            data: sortedTechs.map(function(t) { return t[1]; }),
+                            backgroundColor: '#8b5cf6',
+                            borderRadius: 6
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { ticks: { color: textColor }, grid: { color: gridColor }, beginAtZero: true },
+                            y: { ticks: { color: textColor }, grid: { display: false } }
+                        }
+                    }
+                });
+            }
+        }
+
+        async function fetchGoogleSheetData(showNotification = true) {
+            const jsonUrl = 'https://docs.google.com/spreadsheets/d/' + GOOGLE_SHEET_ID + '/gviz/tq?tqx=out:json&_nc=' + Date.now();
+            const syncIcon = document.getElementById('syncIcon');
+            
+            if (syncIcon) syncIcon.classList.add('fa-spin');
+
+            try {
+                if (showNotification) showToast('Đang tự động đồng bộ Google Sheets...', 'info');
+                
+                const response = await fetch(jsonUrl);
+                if (!response.ok) {
+                    throw new Error('Không thể kết nối Google Sheets. Kiểm tra quyền truy cập công khai.');
+                }
+                
+                const text = await response.text();
+                const openParen = text.indexOf('(');
+                const closeParen = text.lastIndexOf(')');
+                if (openParen === -1 || closeParen === -1) {
+                    throw new Error('Định dạng phản hồi từ Google Sheets không hợp lệ.');
+                }
+                const jsonString = text.substring(openParen + 1, closeParen);
+                const jsonData = JSON.parse(jsonString);
+
+                if (processGvizJson(jsonData)) {
+                    if (showNotification) showToast('Tự động đồng bộ thành công ' + currentDataset.length + ' ca tồn!', 'success');
+                }
+            } catch (err) {
+                console.error('Google Sheets Fetch Error:', err);
+                if (showNotification) {
+                    showToast('Lỗi đồng bộ Google Sheets: ' + err.message, 'error');
+                }
+            } finally {
+                if (syncIcon) syncIcon.classList.remove('fa-spin');
+            }
+        }
+
+        function processGvizJson(jsonData) {
+            if (!jsonData || !jsonData.table || !jsonData.table.rows) {
+                showToast('Không tìm thấy dữ liệu cấu trúc từ Google Sheets!', 'error');
+                return false;
+            }
+
+            const table = jsonData.table;
+            const gvizCols = table.cols || [];
+            const gvizRows = table.rows || [];
+
+            if (gvizRows.length === 0) {
+                showToast('Không tìm thấy dữ liệu trong sheet!', 'error');
+                return false;
+            }
+
+            const rowsMatrix = [];
+            const headerRow = gvizCols.map(function(c) { return c.label || c.id || ''; });
+            rowsMatrix.push(headerRow);
+
+            gvizRows.forEach(function(rowObj) {
+                const rowCells = rowObj.c || [];
+                rowsMatrix.push(rowCells);
+            });
+
+            return processRowsMatrix(rowsMatrix);
+        }
+
+        function getCellVal(row, idx) {
+            if (!row || idx < 0 || idx >= row.length) return '';
+            const cell = row[idx];
+            if (cell === undefined || cell === null) return '';
+            if (typeof cell === 'object') {
+                return cell.f !== undefined && cell.f !== null && cell.f !== '' ? cell.f : (cell.v !== undefined && cell.v !== null ? cell.v : '');
+            }
+            return cell;
+        }
+
+        function processRowsMatrix(rowsMatrix) {
+            if (!rowsMatrix || rowsMatrix.length <= 1) {
+                showToast('Không tìm thấy dữ liệu trong sheet!', 'error');
+                return false;
+            }
+
+            let headerRowIdx = 0;
+            for (let r = 0; r < Math.min(10, rowsMatrix.length); r++) {
+                const row = rowsMatrix[r];
+                const rowStr = row.map(function(c, idx) { 
+                    return String(getCellVal(row, idx)).toUpperCase(); 
+                }).join(' ');
+                if (rowStr.indexOf('SỐ HĐ') !== -1 || rowStr.indexOf('HẠN CÒN LẠI') !== -1 || rowStr.indexOf('BLOCK') !== -1) {
+                    headerRowIdx = r;
+                    break;
+                }
+            }
+
+            const headerCells = rowsMatrix[headerRowIdx];
+            const headers = headerCells.map(function(c, idx) { 
+                return String(getCellVal(headerCells, idx)).trim(); 
+            });
+
+            function getColIndex(candidateNames, fallbackIndex) {
+                const idx = headers.findIndex(function(h) {
+                    const cleanH = String(h).trim().toLowerCase();
+                    return candidateNames.some(function(name) {
+                        const cleanName = name.toLowerCase().trim();
+                        if (cleanName === 'an' || cleanName === 'cột an') {
+                            return cleanH === 'an' || cleanH === 'cột an' || cleanH === 'cot an';
+                        }
+                        return cleanH.indexOf(cleanName) !== -1;
+                    });
+                });
+                return idx !== -1 ? idx : fallbackIndex;
+            }
+
+            const colBlockIdx = getColIndex(['Block', 'Mã Block'], 4);
+            const colSoHDIdx = getColIndex(['Số HĐ', 'So HD', 'Mã HĐ', 'Số HD'], 5);
+            const colTenKHIdx = getColIndex(['Tên đầy đủ', 'Khách hàng', 'Tên KH'], 6);
+            
+            const colTonGioJIdx = 9; // Cột J (Index 9) - Hạn còn lại
+
+            const colHenIdx = getColIndex(['Số lần hẹn', 'Số lần hò', 'Lần hẹn'], 14);
+            const colCLLapIdx = getColIndex(['CL Lặp', 'CL Lap', 'Lặp'], 15);
+            const colTechIdx = getColIndex(['Nhân sự', 'KTV', 'Nhân sự xử lý'], 18);
+            const colUrgentIdx = getColIndex(['KH Giục Tiến Độ', 'Giục tiến độ', 'Giục TĐ', 'Giục'], 21);
+            const colPopIdx = 20; 
+            const colControlIdx = getColIndex(['Kiểm soát', 'Đánh giá'], 38);
+            const colANIdx = getColIndex(['cột an', 'an', 'quản lý', 'leader', 'giám sát'], 39);
+            const colTtclIdx = getColIndex(['TTCL', 'Trạng Thái', 'Trạng thái'], 19);
+
+            const parsedRecords = [];
+            for (let r = headerRowIdx + 1; r < rowsMatrix.length; r++) {
+                const row = rowsMatrix[r];
+                if (!row || row.length === 0) continue;
+
+                const soHD = String(getCellVal(row, colSoHDIdx) || '').trim();
+                const block = String(getCellVal(row, colBlockIdx) || '').trim();
+                
+                if (!soHD && !block) continue;
+
+                const nhanSuKey = String(getCellVal(row, colTechIdx) || '').trim();
+                const quanLyName = managerMapping[nhanSuKey] || String(getCellVal(row, colANIdx) || '').trim();
+
+                const popRaw = String(getCellVal(row, colPopIdx) || '').trim();
+                const popValue = popRaw.substring(0, 7);
+
+                // Xử lý chuẩn xác giá trị từ Cột J (Hạn còn lại): đổi dấu phẩy thành dấu chấm để parseFloat nhận diện chính xác phần thập phân
+                const rawTonGioJ = getCellVal(row, colTonGioJIdx);
+                let tonGioVal = 0;
+                if (typeof rawTonGioJ === 'number') {
+                    tonGioVal = rawTonGioJ;
+                } else if (rawTonGioJ !== undefined && rawTonGioJ !== null && rawTonGioJ !== '') {
+                    let strVal = String(rawTonGioJ).trim();
+                    strVal = strVal.replace(',', '.');
+                    const cleaned = strVal.replace(/[^0-9.-]/g, '');
+                    tonGioVal = cleaned !== '' ? parseFloat(cleaned) : 0;
+                } else {
+                    tonGioVal = 0;
+                }
+
+                parsedRecords.push({
+                    "STT": parsedRecords.length + 1,
+                    "Block": block,
+                    "Số HĐ": soHD,
+                    "Tên đầy đủ": String(getCellVal(row, colTenKHIdx) || '').trim(),
+                    "Hạn còn lại": tonGioVal,
+                    "Số lần hẹn": parseInt(getCellVal(row, colHenIdx), 10) || 0,
+                    "CL Lặp": parseInt(getCellVal(row, colCLLapIdx), 10) || 0,
+                    "Nhân sự": nhanSuKey,
+                    "KH Giục Tiến Độ": String(getCellVal(row, colUrgentIdx) || '').trim(),
+                    "TTCL": String(getCellVal(row, colTtclIdx) || 'Đang XL').trim(),
+                    "POP": popValue,
+                    "Kiểm soát": String(getCellVal(row, colControlIdx) || '').trim(),
+                    "Cột AN": quanLyName
+                });
+            }
+
+            if (parsedRecords.length > 0) {
+                currentDataset = parsedRecords;
+                
+                try {
+                    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(currentDataset));
+                } catch (e) {
+                    console.error('Không thể lưu vào localStorage:', e);
+                }
+
+                populateFilterOptions();
+                renderDashboard();
+                return true;
+            } else {
+                showToast('Không tìm thấy bản ghi hợp lệ nào!', 'error');
+                return false;
+            }
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    
+                    const rowsMatrix = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+                    if (processRowsMatrix(rowsMatrix)) {
+                        showToast('Nạp thành công ' + currentDataset.length + ' ca tồn từ File Excel!', 'success');
+                    }
+                } catch (err) {
+                    showToast('Lỗi khi xử lý file Excel: ' + err.message, 'error');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+            event.target.value = '';
+        }
+
+        function exportDataCSV() {
+            const dataToExport = getFilteredData();
+            if (!dataToExport.length) {
+                showToast('Không có dữ liệu để xuất!', 'error');
+                return;
+            }
+
+            const ws = XLSX.utils.json_to_sheet(dataToExport);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Kiểm Soát Ca Tồn");
+            XLSX.writeFile(wb, "Bao_Cao_Kiem_Soat_Ca_Ton.xlsx");
+            showToast('Đã xuất file Excel báo cáo!', 'success');
+        }
+
+        function toggleDarkMode() {
+            document.documentElement.classList.toggle('dark');
+            const filtered = getFilteredData();
+            renderCharts(filtered);
+        }
+
+        function renderDashboard() {
+            populateFilterOptions();
+            applyFilters();
+        }
+
+        window.onload = function() {
+            fetchGoogleSheetData(true);
+
+            setInterval(function() {
+                fetchGoogleSheetData(false);
+            }, 30000);
+        };
+    </script>
+</body>
+</html>
